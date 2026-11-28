@@ -272,10 +272,9 @@ ZCL_PLATFORM_NODE_LIBS =
 ZCL_CXX_RUNTIME_LIB = -lstdc++
 ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
 # Tools that run on the build host compile with the selected compiler too.
-# Deferred (?=), so the compile-cache wrapper word added to CC below is never
-# part of it. Not exported: build_vendor.sh reads a HOST_CC from the
+# Select the incoming compiler before the compile-cache wrapper is added below. Not exported: build_vendor.sh reads a HOST_CC from the
 # environment as a bootstrap selector (tools/scripts/build_vendor_offline_selftest.sh).
-HOST_CC ?= $(lastword $(CC))
+HOST_CC ?= $(ZCL_CC_PROGRAM)
 # Under an outer recipe that already capped the hard stack limit (t-tsan and
 # t-asan set 1 GiB, then a gate self-test runs make t-hotswap), `unlimited`
 # is refused; take the hard limit instead of failing the nested run.
@@ -317,6 +316,14 @@ ZCL_ANDROID_STANDALONE_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filt
 # These wrappers only validate and recurse; child makes establish their own inputs.
 override ZCL_AGENT_VERIFY_WRAPPER_ONLY := $(if $(filter 1,$(words $(MAKECMDGOALS))),$(if $(filter agent-verify agent-verify-evidence,$(MAKECMDGOALS)),1,))
 
+# Capture the incoming driver before Make adds its own compile-cache wrapper.
+ZCL_CC_PROGRAM := $(firstword $(foreach w,$(CC),$(if $(or $(and $(findstring =,$(w)),$(if $(findstring /,$(firstword $(subst =, ,$(w)))),,1)),$(filter env zcc ccache sccache,$(notdir $(w)))),,$(w))))
+# A command with an unknown launcher or driver retains the established last-word
+# rule. Only strip trailing options from a recognized host compiler.
+zcl_cc_name := $(notdir $(ZCL_CC_PROGRAM))
+ifeq ($(filter cc gcc gcc-% clang clang-% %-gcc %-clang,$(zcl_cc_name)),)
+ZCL_CC_PROGRAM := $(lastword $(CC))
+endif
 ZCL_USE_CCACHE ?= 1
 # The compile cache ships in-tree (tools/zcc.c). Prefer it over any installed
 # sccache/ccache so every developer gets the same fast rebuilds with nothing
@@ -1669,10 +1676,10 @@ ZCL_TU_RANDOM_SEED = $(if $(filter Darwin,$(ZCL_HOST_OS)),,-frandom-seed=$<)
 ZCL_WARN_STRINGOP_OVERFLOW = $(if $(filter Darwin,$(ZCL_HOST_OS)),,-Wno-stringop-overflow)
 
 # CC may be an in-tree cache wrapper followed by the real compiler.  Derive
-# warning support from the final driver token so `make CC=clang` selects a
+# warning support from the selected driver so `make CC=clang` selects a
 # genuinely Clang-clean profile instead of feeding it GCC-only diagnostics.
-ZCL_CC_DRIVER := $(notdir $(lastword $(CC)))
-ZCL_CC_PLAIN := $(lastword $(CC))
+ZCL_CC_DRIVER := $(notdir $(ZCL_CC_PROGRAM))
+ZCL_CC_PLAIN := $(ZCL_CC_PROGRAM)
 ZCL_CC_IS_CLANG := $(if $(findstring clang,$(ZCL_CC_DRIVER)),1,)
 ifneq ($(ZCL_CC_IS_CLANG),)
 ZCL_WARN_MAYBE_UNINITIALIZED =
