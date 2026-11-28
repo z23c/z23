@@ -1942,17 +1942,18 @@ static int cas_test_research_private_directory(void)
         ASSERT(snprintf(marker, sizeof(marker), "%s/.z23-research-profile", target) > 0);
         ASSERT(snprintf(flag, sizeof(flag), "-datadir=%s", home) > 0);
         ASSERT(mkdir(target, 0700) == 0 && symlink(target, dir) == 0);
-        /* Consent precedes identity, so the refusal asserted here is the
-         * linked-directory one and not the missing-catalog one. */
+        /* Consent is supplied so that the one refusal left is the linked
+         * directory, which the argument scan rejects before anything under
+         * the datadir is read or written. */
         char *argv[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
                         flag, (char *)"-testballotcatalog=0000000000000000000000000000000000000000000000000000000000000000",
                         (char *)"-help", NULL};
         int rc = cas_run(argv, home, out, sizeof(out));
         struct stat st;
         bool no_marker = lstat(marker, &st) != 0 && errno == ENOENT;
-        bool identity_refused = strstr(out, "identity is missing or invalid") != NULL;
+        bool linked_refused = strstr(out, "Invalid or unsafe testnet profile invocation.") != NULL;
         (void)test_rm_rf_recursive(home);
-        ASSERT(rc != 0 && no_marker && identity_refused);
+        ASSERT(rc != 0 && no_marker && linked_refused);
         PASS();
     } _test_next:;
     return failures;
@@ -1985,29 +1986,84 @@ static bool cas_scratch_make(const char *home, const char *name, char *path, siz
     return ok;
 }
 
+/* The tracked release ballot, by the digest a research node is pinned to. */
+#define CAS_RESEARCH_BALLOT "bb447e1ae3827c976f4ff08a5b5ac7379fa486ce1bc13480f3e9db7e0dc733af"
+
+static bool cas_write_bytes(const char *path, const void *bytes, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = fwrite(bytes, 1, n, f) == n;
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static bool cas_research_mark(const char *dir)
+{
+    static const char marker[] = "z23-research-profile:ironwood:v1\n";
+    char path[PATH_MAX + 96];
+    int n = snprintf(path, sizeof path, "%s/.z23-research-profile", dir);
+    if (mkdir(dir, 0700) != 0 || chmod(dir, 0700) != 0 ||
+        n < 0 || (size_t)n >= sizeof path) return false;
+    return cas_write_bytes(path, marker, sizeof marker - 1);
+}
+
+/* A marked, private research directory holding the release ballot under its
+ * digest: the smallest datadir a research node can boot from. */
+static bool cas_research_ballot_dir(const char *dir)
+{
+    char ballots[PATH_MAX + 64], path[PATH_MAX + 160], manifest[256];
+    FILE *f = fopen("tests/fixtures/ironwood/selected-manifest.json", "rb");
+    if (!f) return false;
+    size_t n = fread(manifest, 1, sizeof manifest, f);
+    bool ok = fclose(f) == 0 && n > 0 && n < sizeof manifest;
+    int b = snprintf(ballots, sizeof ballots, "%s/ballots", dir);
+    int p = snprintf(path, sizeof path, "%s/%s.json", ballots, CAS_RESEARCH_BALLOT);
+    if (!ok || !cas_research_mark(dir) ||
+        b < 0 || (size_t)b >= sizeof ballots || p < 0 || (size_t)p >= sizeof path ||
+        mkdir(ballots, 0700) != 0) return false;
+    return cas_write_bytes(path, manifest, n);
+}
+
+/* <home><suffix>: the dedicated research directory, prepared with the release
+ * ballot, and the startup line that must name it. */
+static bool cas_research_dir_ready(const char *home, const char *suffix,
+                                   char *dir, size_t dir_cap,
+                                   char *expected, size_t expected_cap)
+{
+    int n = snprintf(dir, dir_cap, "%s%s", home, suffix);
+    int e = snprintf(expected, expected_cap, "datadir=%s", dir);
+    return n > 0 && (size_t)n < dir_cap && e > 0 && (size_t)e < expected_cap &&
+           cas_research_ballot_dir(dir);
+}
+
 static int cas_test_research_datadir(void)
 {
     int failures = 0;
     TEST("research node uses a dedicated directory before startup") {
         char home[PATH_MAX], expected[PATH_MAX + 80], out[16384];
+        char dedicated[PATH_MAX + 80];
         ASSERT(test_mkdtemp(home, sizeof(home), "cas_research") != NULL);
-        int n = snprintf(expected, sizeof(expected), "datadir=%s/.zclassic-c23-ironwood-research", home);
-        ASSERT(n > 0 && (size_t)n < sizeof(expected));
+        /* The profile refuses to start without an explicitly pinned catalog,
+         * so each dedicated directory holds the release ballot before launch. */
+        bool ready = cas_research_dir_ready(home, "/.zclassic-c23-ironwood-research",
+                                            dedicated, sizeof dedicated, expected, sizeof expected);
         char *argv[] = {(char *)CAS_BIN, (char *)"--testnet-profile=ironwood",
                         (char *)"-nolegacyimport", (char *)"-nobgvalidation",
                         (char *)"-backfill-zslp",
-                            (char *)"-testballotcatalog=0000000000000000000000000000000000000000000000000000000000000000", NULL};
-        bool found = cas_research_oneshot(argv, home, expected, out, sizeof(out));
+                        (char *)"-testballotcatalog=" CAS_RESEARCH_BALLOT, NULL};
+        bool found = ready && cas_research_oneshot(argv, home, expected, out, sizeof(out));
         char parent_flag[PATH_MAX + 16];
         int p = snprintf(parent_flag, sizeof(parent_flag), "-datadir=%s", home);
-        int e = snprintf(expected, sizeof(expected), "datadir=%s/ironwood-research", home);
+        bool explicit_ready = cas_research_dir_ready(home, "/ironwood-research",
+                                                     dedicated, sizeof dedicated,
+                                                     expected, sizeof expected);
         char *explicit_argv[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
                                  parent_flag, (char *)"-nolegacyimport",
                                  (char *)"-backfill-zslp",
-                                     (char *)"-testballotcatalog=0000000000000000000000000000000000000000000000000000000000000000", NULL};
-        bool explicit_found = p > 0 && (size_t)p < sizeof(parent_flag) &&
-            e > 0 && (size_t)e < sizeof(expected) &&
-            cas_research_oneshot(explicit_argv, home, expected, out, sizeof(out));
+                                 (char *)"-testballotcatalog=" CAS_RESEARCH_BALLOT, NULL};
+        bool explicit_found = p > 0 && (size_t)p < sizeof(parent_flag) && explicit_ready &&
+                              cas_research_oneshot(explicit_argv, home, expected, out, sizeof(out));
         char scratch[PATH_MAX + 96], snapshot[PATH_MAX + 96];
         bool seeded = cas_scratch_make(home, "chainstate_import_tmp", scratch, sizeof scratch) &&
                       cas_scratch_make(home, ".legacy_ldb_snap", snapshot, sizeof snapshot);
