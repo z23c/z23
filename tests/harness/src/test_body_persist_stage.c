@@ -1017,10 +1017,10 @@ static int bp_research_retained_oversize(void)
     BP_CHECK("research size: setup", setup == 0);
     if (setup != 0) return failures;
     struct transaction *tx = &sc.bodies[1].vtx[0];
-    bool allocated = transaction_alloc(tx, 0, 26);
+    bool allocated = transaction_alloc(tx, 0, 251);
     BP_CHECK("research size: outputs allocated", allocated);
     if (allocated) {
-        for (size_t i = 0; i < 26; i++) {
+        for (size_t i = 0; i < 251; i++) {
             memset(tx->vout[i].script_pub_key.data, 0x51, 8000);
             tx->vout[i].script_pub_key.size = 8000;
         }
@@ -1030,22 +1030,21 @@ static int bp_research_retained_oversize(void)
             BP_CHECK("research size: first body advances", body_persist_stage_step_once() == JOB_ADVANCED);
             BP_CHECK("research size: retained oversized body stops", body_persist_stage_step_once() == JOB_FATAL);
             BP_CHECK("research size: cursor held", body_persist_stage_cursor() == 1);
+            for (size_t i = 26; i < 251; i++)
+                tx->vout[i].script_pub_key.size = 0;
             zcl_alloc_fault_fail_next("research block size");
             BP_CHECK("research size: unavailable check stops", body_persist_stage_step_once() == JOB_FATAL);
+            bool fired = zcl_alloc_fault_armed_label() == NULL;
             zcl_alloc_fault_clear();
+            BP_CHECK("research size: allocation fault fired", fired);
             BP_CHECK("research size: unavailable cursor held", body_persist_stage_cursor() == 1);
             int ok = -1; char source[32];
             BP_CHECK("research size: no success row",
                      !log_row_at(progress_store_db(), 1, &ok, source, sizeof(source)));
             BP_CHECK("research size: no output publication", bp_no_outputs_at(progress_store_db(), 1));
-            block_free(&sc.bodies[1]);
-            bool rebuilt = make_body(&sc.bodies[1], 1);
-            BP_CHECK("research size: valid body rebuilt", rebuilt);
-            if (rebuilt) {
-                BP_CHECK("research size: valid retry advances", body_persist_stage_step_once() == JOB_ADVANCED);
-                BP_CHECK("research size: retry publishes success",
-                         log_row_at(progress_store_db(), 1, &ok, source, sizeof(source)) && ok == 1);
-            }
+            BP_CHECK("research size: valid retry advances", body_persist_stage_step_once() == JOB_ADVANCED);
+            BP_CHECK("research size: retry publishes success",
+                     log_row_at(progress_store_db(), 1, &ok, source, sizeof(source)) && ok == 1);
         }
         chain_params_select(CHAIN_MAIN);
     }

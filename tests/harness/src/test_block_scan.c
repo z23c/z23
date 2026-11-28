@@ -1256,7 +1256,7 @@ static int test_research_scan_size(void)
         stream_init(&s, 0);
         ok = block_serialize(&b, &s) && s.size == size;
         int result = ok ? boot_block_scan_test_research_size(s.data, s.size) : -1;
-        if (result != (size == 200000 ? RESEARCH_BLOCK_SIZE_OK : RESEARCH_BLOCK_SIZE_EXCEEDED)) failures++;
+        if (result != RESEARCH_BLOCK_SIZE_OK) failures++;
         stream_free(&s);
     }
     block_free(&b);

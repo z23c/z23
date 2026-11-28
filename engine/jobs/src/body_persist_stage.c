@@ -554,8 +554,9 @@ static job_result_t step_persist(struct stage_step_ctx *c)
                                         &g_merkle_mismatch_total, false);
     }
 
+    /* Parent ballots determine the exact rule; persistence only knows the ceiling. */
     enum research_block_size_verdict size =
-        research_block_size_check(chain_params_get(), blk);
+        research_block_size_check_ceiling(chain_params_get(), blk);
     if (size != RESEARCH_BLOCK_SIZE_OK) {
         release_stage_block(&handle, &owned, borrowed);
         LOG_RETURN(JOB_FATAL, STAGE_NAME,

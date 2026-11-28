@@ -40,7 +40,7 @@
 #include "event/event.h"
 #include "primitives/block.h"
 #include "storage/boot_auto_reindex.h"
-#include "services/research_block_size.h"
+#include "services/research_rules_gate.h"
 #include "util/util.h"
 #include "storage/nullifier_kv.h"
 #include "storage/progress_store.h"
@@ -72,8 +72,9 @@ static bool boot_index_research_chain_size_valid(const struct block_index *tip,
     for (const struct block_index *bi = tip; bi; bi = bi->pprev) {
         struct block block;
         block_init(&block);
-        bool ok = read_block_from_disk_index(&block, bi, datadir) &&
-                  research_block_size_check(params, &block) == RESEARCH_BLOCK_SIZE_OK;
+        bool ok = read_block_from_disk_index(&block, bi, datadir);
+        if (ok)
+            ok = research_rules_gate(params, &block, bi->pprev, datadir).verdict == RESEARCH_GATE_PASS;
         block_free(&block);
         if (!ok) {
             fprintf(stderr, "research block size or read failed at height %d\n", bi->nHeight);
@@ -607,10 +608,10 @@ static bool boot_index_reindex_replay_height(struct main_state *ms,
         return false; /* Can't skip blocks during UTXO replay */
     }
 
-    enum research_block_size_verdict size = research_block_size_check(cparams, &blk);
-    if (size != RESEARCH_BLOCK_SIZE_OK) {
-        fprintf(stderr, "reindex-chainstate: research block size %s at height %d\n",
-                size == RESEARCH_BLOCK_SIZE_EXCEEDED ? "exceeded" : "unavailable", h);
+    struct research_gate_decision gate = research_rules_gate(cparams, &blk, pindex->pprev, body_datadir);
+    if (gate.verdict != RESEARCH_GATE_PASS) {
+        fprintf(stderr, "reindex-chainstate: research rule %s at height %d: %s\n",
+                gate.rule, h, gate.detail);
         block_free(&blk);
         return false;
     }

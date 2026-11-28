@@ -34,6 +34,7 @@
 #include "jobs/block_header_emit.h"
 #include "jobs/created_outputs_index.h"
 #include "jobs/mint_skip_crypto.h"
+#include "services/research_rules_gate.h"
 #include "jobs/reducer_frontier.h"
 #include "jobs/script_validate_contextual.h"
 #include "stage_repair_coin_backfill_util.h"
@@ -748,6 +749,23 @@ static job_result_t step_validate(struct stage_step_ctx *c)
     if (sv_step_acquire_block(ms, next_h, total_started, &bi, &handle,
                               &owned, &borrowed, &blk, &decided))
         return decided;
+
+    struct research_gate_decision gate =
+        research_rules_gate(chain_params_get(), blk, bi->pprev, g_datadir);
+    if (gate.verdict != RESEARCH_GATE_PASS) {
+        sv_release_stage_block(&handle, &owned, borrowed);
+        if (gate.verdict == RESEARCH_GATE_HOLD) {
+            LOG_WARN(STAGE_NAME, "research rule held height=%d: %s", next_h, gate.detail);
+            return JOB_IDLE;
+        }
+        LOG_WARN(STAGE_NAME, "research rule rejected height=%d rule=%s transaction=%zu",
+                 next_h, gate.rule, gate.offender);
+        if (!script_validate_log_insert(db, next_h, gate.rule, false,
+                                        0, 0, NULL, -1, SCRIPT_ERR_OK, bi->phashBlock))
+            return sv_db_fault(sqlite3_extended_errcode(db), next_h, "research gate log insert");
+        c->cursor_out = c->cursor_in + 1;
+        return JOB_ADVANCED;
+    }
 
     if (sv_step_contextual_gate(c, db, ms, next_h, bi, blk, &handle, &owned,
                                 borrowed, &decided))

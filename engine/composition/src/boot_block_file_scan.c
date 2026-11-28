@@ -147,7 +147,7 @@ static enum research_block_size_verdict scan_research_body_size(
     block_init(&block);
     bool parsed = block_deserialize(&block, &body) && !stream_remaining(&body);
     enum research_block_size_verdict verdict = parsed
-        ? research_block_size_check(chain_params_get(), &block)
+        ? research_block_size_check_ceiling(chain_params_get(), &block)
         : RESEARCH_BLOCK_SIZE_UNAVAILABLE;
     block_free(&block);
     return verdict;

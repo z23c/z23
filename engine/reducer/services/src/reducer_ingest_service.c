@@ -21,7 +21,7 @@
 #include "services/chain_activation_service.h"
 #include "services/reducer_ingest_service.h"
 #include "services/reducer_drain.h"
-#include "services/research_block_size.h"
+#include "services/research_rules_gate.h"
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
 #include "event/event.h"
@@ -465,17 +465,38 @@ static bool reducer_gate_header_context(struct chain_activation_controller *ctl,
     return ok;
 }
 
+static bool reducer_research_preflight(struct chain_activation_controller *ctl,
+                                      const struct block *block, struct validation_state *out)
+{
+    if (!research_rules_binding()) return true;
+    char datadir[2048] = {0};
+    GetDataDir(true, datadir, sizeof datadir);
+    reducer_context_lock_main(ctl->ms);
+    struct block_index *parent = block_map_find(&ctl->ms->map_block_index,
+                                                 &block->header.hashPrevBlock);
+    if (!parent && !uint256_is_null(&block->header.hashPrevBlock)) {
+        zcl_mutex_unlock(&ctl->ms->cs_main);
+        return true; /* The contextual header check decides unknown parents. */
+    }
+    struct research_gate_decision gate =
+        research_rules_gate(ctl->params, block, parent, datadir);
+    zcl_mutex_unlock(&ctl->ms->cs_main);
+    if (gate.verdict == RESEARCH_GATE_PASS) return true;
+    if (gate.verdict == RESEARCH_GATE_HOLD) {
+        LOG_WARN("reducer", "research rule held: %s", gate.detail);
+        return validation_state_error(out, gate.rule);
+    }
+    LOG_WARN("reducer", "research rule rejected: %s transaction=%zu", gate.rule, gate.offender);
+    const char *reason = gate.offender ? "research-deposit-freeze" : "bad-blk-length";
+    return validation_state_dos(out, 100, false, REJECT_INVALID, reason, false, gate.detail);
+}
+
 static bool reducer_block_preflight(struct chain_activation_controller *ctl,
     struct block *block, struct validation_state *out, bool full)
 {
     if (!ctl->ms || !ctl->params)
         return validation_state_error(out, "reducer-main-state-unwired");
-    enum research_block_size_verdict size = research_block_size_check(ctl->params, block);
-    if (size == RESEARCH_BLOCK_SIZE_UNAVAILABLE)
-        return validation_state_error(out, "research-block-size-unavailable");
-    if (size == RESEARCH_BLOCK_SIZE_EXCEEDED)
-        return validation_state_dos(out, 100, false, REJECT_INVALID,
-                                    "bad-blk-length", false, "research block size limit");
+    if (!reducer_research_preflight(ctl, block, out)) return false;
     if (!check_block(block, out, ctl->params, full, full, true)) {
         LOG_WARN("reducer", "%s: %s", full ? "check_block failed" : "catchup body preflight failed",
                  out->reject_reason[0] ? out->reject_reason : "unknown");
