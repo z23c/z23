@@ -63,6 +63,8 @@ struct sqlite3;
 /* `pool` column values. Must never be renumbered: rows are durable. */
 #define NULLIFIER_POOL_SPROUT  0
 #define NULLIFIER_POOL_SAPLING 1
+/* Research Ironwood namespace; a row count alone does not prove history complete. */
+#define NULLIFIER_POOL_IRONWOOD 2
 
 /* Durable bounded-replay session keys. They are public so an atomic state
  * generation replacement can cancel a superseded session in the same txn. */

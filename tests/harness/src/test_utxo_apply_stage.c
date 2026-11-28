@@ -5,6 +5,7 @@
 #include "test/test_core.h"
 #include "test/test_block_map.h"
 #include "test/block_fixtures.h"
+#include "transaction_v6_ironwood_fixture.h"
 
 #include "bloom/merkle.h"
 #include "chain/chain.h"
@@ -14,6 +15,7 @@
 #include "json/json.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
+#include "primitives/transaction_v6_wire.h"
 #include "sapling/incremental_merkle_tree.h"
 #include "jobs/created_outputs_index.h"
 #include "jobs/reducer_frontier.h"
@@ -88,6 +90,9 @@ struct synth_chain_uv {
     int                 upstream_fail_height;
     int                 read_calls;
     int                 read_fail_height;  /* fake_reader() fails here */
+    int                 v6_metadata_fault_height;
+    int                 v6_metadata_fault_tx;
+    bool                v6_metadata_wrong_group;
     enum uv_fail_kind   fail_kind;
 };
 
@@ -236,6 +241,7 @@ static bool synth_chain_uv_build(struct synth_chain_uv *sc, int n)
     if (!sc->blocks || !sc->hashes || !sc->bodies || !sc->ext)
         return false;
     sc->read_fail_height = -1;
+    sc->v6_metadata_fault_height = -1;
     for (int i = 0; i < n; i++) {
         if (!make_body(sc, i)) return false;
         if (i > 0)
@@ -278,7 +284,21 @@ static bool fake_reader(struct block *out, const struct block_index *bi,
     if (bi->nHeight == sc->read_fail_height)
         return false;  /* simulate on-disk bytes vanished/corrupted */
     sc->read_calls++;
-    return test_block_copy(out, &sc->bodies[bi->nHeight], "uv_tx_copy");
+    if (!test_block_copy(out, &sc->bodies[bi->nHeight], "uv_tx_copy"))
+        return false;
+    if (bi->nHeight == sc->v6_metadata_fault_height) {
+        if (sc->v6_metadata_fault_tx < 0 ||
+            (size_t)sc->v6_metadata_fault_tx >= out->num_vtx)
+            return false;
+        struct transaction *tx = &out->vtx[sc->v6_metadata_fault_tx];
+        if (!tx->v6_wire.data)
+            return false;
+        if (sc->v6_metadata_wrong_group)
+            tx->version_group_id = IRONWOOD_VERSION_GROUP_ID ^ 1u;
+        else
+            tx->overwintered = false;
+    }
+    return true;
 }
 
 static bool fake_lookup(const struct uint256 *txid, uint32_t vout,
@@ -623,6 +643,147 @@ static bool uv_append_bare_tx(struct block *b, int h)
     synthetic_txid(&tx->hash, h, 3);
     b->num_vtx++;
     return true;
+}
+
+/* Build an opaque, structurally parseable Ironwood carrier with n actions.
+ * The reducer under test consumes only action nullifiers; no proof validity is
+ * claimed by this fixture or by its admission directly into the stage body. */
+static bool uv_add_ironwood_actions(struct transaction *tx,
+                                    const uint8_t *tags, size_t n,
+                                    uint8_t mark)
+{
+    if (!tx || !tags || n == 0 || n >= 253)
+        return false;
+    struct v6_wire_view original;
+    if (v6_core_parse(ironwood_anchor_a, sizeof ironwood_anchor_a,
+                      &original) != V6_WIRE_OK ||
+        original.ironwood.count != 1 ||
+        original.ironwood.actions.size != 820 ||
+        original.ironwood.signatures.size != 64 ||
+        original.ironwood.binding_signature.size != 64)
+        return false;
+    const uint8_t *base = ironwood_anchor_a;
+    size_t prefix = (size_t)(original.ironwood.actions.data - base);
+    size_t tail = (size_t)(original.ironwood.flags.data - base);
+    size_t signatures = (size_t)(original.ironwood.signatures.data - base);
+    size_t binding = (size_t)(original.ironwood.binding_signature.data - base);
+    size_t action_size = original.ironwood.actions.size;
+    size_t signature_size = original.ironwood.signatures.size;
+    if (!prefix || base[prefix - 1] != 1 || tail <= prefix ||
+        signatures < tail || binding < signatures ||
+        n - 1 > (SIZE_MAX - sizeof ironwood_anchor_a) /
+            (action_size + signature_size))
+        return false;
+    size_t size = sizeof ironwood_anchor_a +
+        (n - 1) * (action_size + signature_size);
+    uint8_t *wire = zcl_malloc(size, "uv_iw_wire");
+    if (!wire)
+        return false;
+    memcpy(wire, base, prefix);
+    wire[prefix - 1] = (uint8_t)n;
+    for (size_t i = 0; i < n; i++) {
+        size_t at = prefix + i * action_size;
+        memcpy(wire + at, original.ironwood.actions.data, action_size);
+        uv_nf_bytes(wire + at + 32, tags[i], mark);
+    }
+    size_t new_tail = prefix + n * action_size;
+    size_t middle_size = signatures - tail;
+    memcpy(wire + new_tail, base + tail, middle_size);
+    size_t new_signatures = new_tail + middle_size;
+    for (size_t i = 0; i < n; i++)
+        memcpy(wire + new_signatures + i * signature_size,
+               original.ironwood.signatures.data, signature_size);
+    size_t new_binding = new_signatures + n * signature_size;
+    memcpy(wire + new_binding, base + binding,
+           original.ironwood.binding_signature.size);
+
+    struct v6_wire_view check;
+    bool ok = v6_core_parse(wire, size, &check) == V6_WIRE_OK &&
+        check.ironwood.count == n;
+    for (size_t i = 0; ok && i < n; i++) {
+        struct v6_action_view action;
+        uint8_t expected[32];
+        uv_nf_bytes(expected, tags[i], mark);
+        ok = v6_core_bundle_action(&check.ironwood, i, &action) &&
+            action.nullifier.size == sizeof expected &&
+            memcmp(action.nullifier.data, expected, sizeof expected) == 0;
+    }
+    if (ok) {
+        tx->overwintered = true;
+        tx->version = IRONWOOD_TX_VERSION;
+        tx->version_group_id = IRONWOOD_VERSION_GROUP_ID;
+        ok = transaction_v6_store_wire(tx, wire, size, size);
+    }
+    free(wire);
+    return ok;
+}
+
+static bool uv_add_malformed_ironwood(struct transaction *tx)
+{
+    uint8_t wire[sizeof ironwood_anchor_a - 1];
+    memcpy(wire, ironwood_anchor_a, sizeof wire);
+    tx->overwintered = true;
+    tx->version = IRONWOOD_TX_VERSION;
+    tx->version_group_id = IRONWOOD_VERSION_GROUP_ID;
+    return transaction_v6_store_wire(tx, wire, sizeof wire, sizeof wire);
+}
+
+/* Add two structurally parseable 96-byte v6 Sapling spends with the same
+ * nullifier alongside one Ironwood action. Proof bytes remain zero: this is a
+ * reducer refusal fixture, not a validity-bearing transaction. */
+static bool uv_add_mixed_v6_repeated_sapling(struct transaction *tx,
+                                             uint8_t sapling_tag,
+                                             uint8_t ironwood_tag,
+                                             uint8_t mark)
+{
+    enum { SPEND = 96, PROOF = 192, SIGNATURE = 64 };
+    struct v6_wire_view original;
+    if (v6_core_parse(ironwood_anchor_a, sizeof ironwood_anchor_a,
+                      &original) != V6_WIRE_OK ||
+        original.sapling_spends.count || original.sapling_outputs.count ||
+        original.orchard.count || original.ironwood.count != 1 ||
+        original.sapling_tail.size != 0 ||
+        !original.sapling_spends.wire.data || !original.sapling_tail.data)
+        return false;
+    const uint8_t *base = ironwood_anchor_a;
+    size_t spends = (size_t)(original.sapling_spends.wire.data - base);
+    size_t tail = (size_t)(original.sapling_tail.data - base);
+    size_t tail_size = 8 + 32 + 2 * PROOF + 2 * SIGNATURE + SIGNATURE;
+    if (!spends || base[spends - 1] != 0 || tail < spends ||
+        tail > sizeof ironwood_anchor_a ||
+        tail_size > SIZE_MAX - sizeof ironwood_anchor_a - 2 * SPEND)
+        return false;
+    size_t size = sizeof ironwood_anchor_a + 2 * SPEND + tail_size;
+    uint8_t *wire = zcl_calloc(size, 1, "uv_v6_mixed");
+    if (!wire)
+        return false;
+    memcpy(wire, base, spends);
+    wire[spends - 1] = 2;
+    for (size_t i = 0; i < 2; i++)
+        uv_nf_bytes(wire + spends + i * SPEND + 32, sapling_tag, mark);
+    memcpy(wire + spends + 2 * SPEND, base + spends, tail - spends);
+    size_t new_tail = tail + 2 * SPEND;
+    memcpy(wire + new_tail + tail_size, base + tail,
+           sizeof ironwood_anchor_a - tail);
+
+    struct v6_wire_view check;
+    bool ok = v6_core_parse(wire, size, &check) == V6_WIRE_OK &&
+        check.sapling_spends.count == 2 &&
+        check.sapling_spends.wire.size == 2 * SPEND &&
+        !check.orchard.count && check.ironwood.count == 1 &&
+        memcmp(check.sapling_spends.wire.data + 32,
+               check.sapling_spends.wire.data + SPEND + 32, 32) == 0;
+    struct v6_action_view action;
+    ok = ok && v6_core_bundle_action(&check.ironwood, 0, &action);
+    if (ok) {
+        uv_nf_bytes((uint8_t *)action.nullifier.data, ironwood_tag, mark);
+        tx->overwintered = true;
+        tx->version = IRONWOOD_TX_VERSION;
+        tx->version_group_id = IRONWOOD_VERSION_GROUP_ID;
+        ok = transaction_v6_store_wire(tx, wire, size, size);
+    }
+    free(wire);
+    return ok;
 }
 
 /* COUNT(*) of nullifier rows revealed at `height`. -1 on error. */
@@ -2232,6 +2393,311 @@ static int uv_nf_rewind_cases(void)
     return failures;
 }
 
+static int uv_nf_ironwood_cross_block_cases(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_uv sc;
+    blocker_clear("utxo_apply.apply_failed");
+    UV_CHECK("nf ironwood cross: setup",
+             uv_setup("nf_iw_cross", 3, UV_FAIL_NONE, -1, dir, sizeof(dir),
+                      &ms, &sc) == 0);
+    const uint8_t first[1] = { 0x31 };
+    const uint8_t second[2] = { 0x32, 0x31 };
+    UV_CHECK("nf ironwood cross: h=1 action attaches",
+             uv_append_bare_tx(&sc.bodies[1], 1) &&
+             uv_add_ironwood_actions(&sc.bodies[1].vtx[2], first, 1, 0x81));
+    UV_CHECK("nf ironwood cross: h=2 actions attach",
+             uv_append_bare_tx(&sc.bodies[2], 2) &&
+             uv_add_ironwood_actions(&sc.bodies[2].vtx[2], second, 2, 0x81));
+    UV_CHECK("nf ironwood cross: drains until duplicate height",
+             utxo_apply_stage_drain(100) == 2);
+    UV_CHECK("nf ironwood cross: duplicate blocker",
+             uv_blocker_reason_has("status=shielded_double_spend"));
+    UV_CHECK("nf ironwood cross: cursor held at h=2",
+             utxo_apply_stage_cursor() == 2);
+    UV_CHECK("nf ironwood cross: h=1 row revealed",
+             uv_nf_rows_at(progress_store_db(), 1) == 1);
+    UV_CHECK("nf ironwood cross: rejected h=2 has no partial rows",
+             uv_nf_rows_at(progress_store_db(), 2) == 0);
+    uint8_t fresh[32]; bool found = true;
+    uv_nf_bytes(fresh, 0x32, 0x81);
+    UV_CHECK("nf ironwood cross: fresh action from rejected block absent",
+             nullifier_kv_get(progress_store_db(), fresh,
+                              NULLIFIER_POOL_IRONWOOD, &found, NULL) && !found);
+    blocker_clear("utxo_apply.apply_failed");
+    uv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+static int uv_nf_ironwood_intra_block_cases(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_uv sc;
+    blocker_clear("utxo_apply.apply_failed");
+    UV_CHECK("nf ironwood intra: setup",
+             uv_setup("nf_iw_intra", 2, UV_FAIL_NONE, -1, dir, sizeof(dir),
+                      &ms, &sc) == 0);
+    const uint8_t first[1] = { 0x41 };
+    const uint8_t second[2] = { 0x42, 0x41 };
+    UV_CHECK("nf ironwood intra: first tx attaches",
+             uv_append_bare_tx(&sc.bodies[1], 1) &&
+             uv_add_ironwood_actions(&sc.bodies[1].vtx[2], first, 1, 0x82));
+    UV_CHECK("nf ironwood intra: duplicate tx attaches",
+             uv_append_bare_tx(&sc.bodies[1], 1) &&
+             uv_add_ironwood_actions(&sc.bodies[1].vtx[3], second, 2, 0x82));
+    UV_CHECK("nf ironwood intra: drains until duplicate block",
+             utxo_apply_stage_drain(100) == 1);
+    UV_CHECK("nf ironwood intra: duplicate blocker",
+             uv_blocker_reason_has("status=shielded_double_spend"));
+    UV_CHECK("nf ironwood intra: cursor held at h=1",
+             utxo_apply_stage_cursor() == 1);
+    UV_CHECK("nf ironwood intra: rejected block has no partial rows",
+             uv_nf_rows_at(progress_store_db(), 1) == 0);
+    uint8_t fresh[32]; bool found = true;
+    uv_nf_bytes(fresh, 0x42, 0x82);
+    UV_CHECK("nf ironwood intra: fresh action from rejected tx absent",
+             nullifier_kv_get(progress_store_db(), fresh,
+                              NULLIFIER_POOL_IRONWOOD, &found, NULL) && !found);
+    blocker_clear("utxo_apply.apply_failed");
+    uv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+static int uv_nf_ironwood_duplicate_action_cases(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_uv sc;
+    blocker_clear("utxo_apply.apply_failed");
+    UV_CHECK("nf ironwood actions: setup",
+             uv_setup("nf_iw_actions", 2, UV_FAIL_NONE, -1, dir, sizeof(dir),
+                      &ms, &sc) == 0);
+    const uint8_t tags[3] = { 0x51, 0x52, 0x52 };
+    UV_CHECK("nf ironwood actions: duplicate actions attach",
+             uv_append_bare_tx(&sc.bodies[1], 1) &&
+             uv_add_ironwood_actions(&sc.bodies[1].vtx[2], tags, 3, 0x83));
+    UV_CHECK("nf ironwood actions: drains until duplicate block",
+             utxo_apply_stage_drain(100) == 1);
+    UV_CHECK("nf ironwood actions: duplicate blocker",
+             uv_blocker_reason_has("status=shielded_double_spend"));
+    UV_CHECK("nf ironwood actions: cursor held at h=1",
+             utxo_apply_stage_cursor() == 1);
+    UV_CHECK("nf ironwood actions: no partial rows",
+             uv_nf_rows_at(progress_store_db(), 1) == 0);
+    uint8_t fresh[32]; bool found = true;
+    uv_nf_bytes(fresh, 0x51, 0x83);
+    UV_CHECK("nf ironwood actions: earlier fresh action absent",
+             nullifier_kv_get(progress_store_db(), fresh,
+                              NULLIFIER_POOL_IRONWOOD, &found, NULL) && !found);
+    blocker_clear("utxo_apply.apply_failed");
+    uv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+static int uv_nf_ironwood_cross_pool_cases(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_uv sc;
+    UV_CHECK("nf ironwood xpool: setup",
+             uv_setup("nf_iw_xpool", 2, UV_FAIL_NONE, -1, dir, sizeof(dir),
+                      &ms, &sc) == 0);
+    const uint8_t tag[1] = { 0x61 };
+    UV_CHECK("nf ironwood xpool: Sapling action attaches",
+             uv_add_sapling_spends(&sc.bodies[1].vtx[1], tag, 1, 0x84));
+    UV_CHECK("nf ironwood xpool: same-byte Ironwood action attaches",
+             uv_append_bare_tx(&sc.bodies[1], 1) &&
+             uv_add_ironwood_actions(&sc.bodies[1].vtx[2], tag, 1, 0x84));
+    UV_CHECK("nf ironwood xpool: block applies",
+             utxo_apply_stage_drain(100) == 2);
+    UV_CHECK("nf ironwood xpool: both pool rows revealed",
+             uv_nf_rows_at(progress_store_db(), 1) == 2);
+    uint8_t nf[32]; bool sapling = false, ironwood = false;
+    int64_t sapling_h = -1, ironwood_h = -1;
+    uv_nf_bytes(nf, 0x61, 0x84);
+    UV_CHECK("nf ironwood xpool: Sapling row retained",
+             nullifier_kv_get(progress_store_db(), nf, NULLIFIER_POOL_SAPLING,
+                              &sapling, &sapling_h) && sapling && sapling_h == 1);
+    UV_CHECK("nf ironwood xpool: Ironwood row retained separately",
+             nullifier_kv_get(progress_store_db(), nf, NULLIFIER_POOL_IRONWOOD,
+                              &ironwood, &ironwood_h) && ironwood && ironwood_h == 1);
+    UV_CHECK("nf ironwood xpool: no apply blocker",
+             !blocker_exists("utxo_apply.apply_failed"));
+    uv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+static int uv_nf_ironwood_malformed_cases(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_uv sc;
+    blocker_clear("utxo_apply.apply_failed");
+    blocker_clear("utxo_apply.fatal_store");
+    UV_CHECK("nf ironwood malformed: setup",
+             uv_setup("nf_iw_malformed", 2, UV_FAIL_NONE, -1, dir, sizeof(dir),
+                      &ms, &sc) == 0);
+    const uint8_t tag[1] = { 0x71 };
+    UV_CHECK("nf ironwood malformed: earlier valid action attaches",
+             uv_append_bare_tx(&sc.bodies[1], 1) &&
+             uv_add_ironwood_actions(&sc.bodies[1].vtx[2], tag, 1, 0x85));
+    UV_CHECK("nf ironwood malformed: truncated opaque image attaches",
+             uv_append_bare_tx(&sc.bodies[1], 1) &&
+             uv_add_malformed_ironwood(&sc.bodies[1].vtx[3]));
+    UV_CHECK("nf ironwood malformed: genesis applies",
+             utxo_apply_stage_drain(1) == 1);
+    UV_CHECK("nf ironwood malformed: reducer fails closed",
+             utxo_apply_stage_step_once() == JOB_FATAL);
+    UV_CHECK("nf ironwood malformed: cursor held at h=1",
+             utxo_apply_stage_cursor() == 1);
+    UV_CHECK("nf ironwood malformed: no partial rows",
+             uv_nf_rows_at(progress_store_db(), 1) == 0);
+    uint8_t nf[32]; bool found = true;
+    uv_nf_bytes(nf, 0x71, 0x85);
+    UV_CHECK("nf ironwood malformed: earlier valid action absent",
+             nullifier_kv_get(progress_store_db(), nf,
+                              NULLIFIER_POOL_IRONWOOD, &found, NULL) && !found);
+    UV_CHECK("nf ironwood malformed: fatal store blocker named",
+             blocker_exists("utxo_apply.fatal_store"));
+    blocker_clear("utxo_apply.apply_failed");
+    blocker_clear("utxo_apply.fatal_store");
+    uv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+static int uv_nf_ironwood_mixed_v6_cases(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_uv sc;
+    blocker_clear("utxo_apply.apply_failed");
+    blocker_clear("utxo_apply.fatal_store");
+    UV_CHECK("nf ironwood mixed v6: setup",
+             uv_setup("nf_iw_mixed_v6", 3, UV_FAIL_NONE, -1, dir, sizeof(dir),
+                      &ms, &sc) == 0);
+    const uint8_t prior[1] = { 0x21 };
+    UV_CHECK("nf ironwood mixed v6: prior Ironwood action attaches",
+             uv_append_bare_tx(&sc.bodies[1], 1) &&
+             uv_add_ironwood_actions(&sc.bodies[1].vtx[2], prior, 1, 0x91));
+    UV_CHECK("nf ironwood mixed v6: repeated Sapling spends attach",
+             uv_append_bare_tx(&sc.bodies[2], 2) &&
+             uv_add_mixed_v6_repeated_sapling(&sc.bodies[2].vtx[2],
+                                               0x22, 0x23, 0x91));
+    UV_CHECK("nf ironwood mixed v6: prior height applies",
+             utxo_apply_stage_drain(100) == 2);
+    UV_CHECK("nf ironwood mixed v6: mixed block rejected",
+             utxo_apply_stage_step_once() == JOB_FATAL);
+    UV_CHECK("nf ironwood mixed v6: cursor held at h=2",
+             utxo_apply_stage_cursor() == 2);
+    UV_CHECK("nf ironwood mixed v6: prior Ironwood row retained",
+             uv_nf_rows_at(progress_store_db(), 1) == 1);
+    UV_CHECK("nf ironwood mixed v6: zero new nullifier rows",
+             uv_nf_rows_at(progress_store_db(), 2) == 0);
+    uint8_t fresh[32]; bool found = true;
+    uv_nf_bytes(fresh, 0x23, 0x91);
+    UV_CHECK("nf ironwood mixed v6: new Ironwood action absent",
+             nullifier_kv_get(progress_store_db(), fresh,
+                              NULLIFIER_POOL_IRONWOOD, &found, NULL) && !found);
+    UV_CHECK("nf ironwood mixed v6: fatal refusal named",
+             blocker_exists("utxo_apply.fatal_store"));
+    blocker_clear("utxo_apply.apply_failed");
+    blocker_clear("utxo_apply.fatal_store");
+    uv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+static int uv_nf_ironwood_metadata_cases(bool wrong_group)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_uv sc;
+    blocker_clear("utxo_apply.apply_failed");
+    blocker_clear("utxo_apply.fatal_store");
+    const char *name = wrong_group ? "nf_iw_wrong_group" : "nf_iw_non_overwinter";
+    UV_CHECK("nf ironwood metadata: setup",
+             uv_setup(name, 2, UV_FAIL_NONE, -1, dir, sizeof(dir),
+                      &ms, &sc) == 0);
+    const uint8_t good[1] = { 0x24 };
+    const uint8_t bad[1] = { 0x25 };
+    UV_CHECK("nf ironwood metadata: earlier valid action attaches",
+             uv_append_bare_tx(&sc.bodies[1], 1) &&
+             uv_add_ironwood_actions(&sc.bodies[1].vtx[2], good, 1, 0x92));
+    UV_CHECK("nf ironwood metadata: second valid wire attaches",
+             uv_append_bare_tx(&sc.bodies[1], 1) &&
+             uv_add_ironwood_actions(&sc.bodies[1].vtx[3], bad, 1, 0x92));
+    sc.v6_metadata_fault_height = 1;
+    sc.v6_metadata_fault_tx = 3;
+    sc.v6_metadata_wrong_group = wrong_group;
+    UV_CHECK("nf ironwood metadata: genesis applies",
+             utxo_apply_stage_drain(1) == 1);
+    UV_CHECK(wrong_group ? "nf ironwood wrong-group: rejected" :
+                           "nf ironwood non-overwintered: rejected",
+             utxo_apply_stage_step_once() == JOB_FATAL);
+    UV_CHECK("nf ironwood metadata: cursor held at h=1",
+             utxo_apply_stage_cursor() == 1);
+    UV_CHECK("nf ironwood metadata: no partial rows",
+             uv_nf_rows_at(progress_store_db(), 1) == 0);
+    uint8_t prior[32]; bool found = true;
+    uv_nf_bytes(prior, 0x24, 0x92);
+    UV_CHECK("nf ironwood metadata: earlier valid action absent",
+             nullifier_kv_get(progress_store_db(), prior,
+                              NULLIFIER_POOL_IRONWOOD, &found, NULL) && !found);
+    UV_CHECK("nf ironwood metadata: fatal refusal named",
+             blocker_exists("utxo_apply.fatal_store"));
+    blocker_clear("utxo_apply.apply_failed");
+    blocker_clear("utxo_apply.fatal_store");
+    uv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+static int uv_nf_ironwood_wrong_group_cases(void)
+{
+    return uv_nf_ironwood_metadata_cases(true);
+}
+
+static int uv_nf_ironwood_non_overwintered_cases(void)
+{
+    return uv_nf_ironwood_metadata_cases(false);
+}
+
+static int uv_nf_ironwood_rewind_cases(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_uv sc;
+    UV_CHECK("nf ironwood rewind: setup",
+             uv_setup("nf_iw_rewind", 3, UV_FAIL_NONE, -1, dir, sizeof(dir),
+                      &ms, &sc) == 0);
+    const uint8_t first[1] = { 0x91 };
+    const uint8_t second[1] = { 0x92 };
+    UV_CHECK("nf ironwood rewind: h=1 action attaches",
+             uv_append_bare_tx(&sc.bodies[1], 1) &&
+             uv_add_ironwood_actions(&sc.bodies[1].vtx[2], first, 1, 0x86));
+    UV_CHECK("nf ironwood rewind: h=2 action attaches",
+             uv_append_bare_tx(&sc.bodies[2], 2) &&
+             uv_add_ironwood_actions(&sc.bodies[2].vtx[2], second, 1, 0x86));
+    UV_CHECK("nf ironwood rewind: first apply drains 3",
+             utxo_apply_stage_drain(100) == 3);
+    sqlite3 *db = progress_store_db();
+    UV_CHECK("nf ironwood rewind: rows revealed",
+             uv_nf_rows_at(db, 1) == 1 && uv_nf_rows_at(db, 2) == 1);
+    bool rewound =
+        exec_sql(db, "BEGIN IMMEDIATE") &&
+        utxo_apply_emit_inverse_delta(db, 2) &&
+        utxo_apply_emit_inverse_delta(db, 1) &&
+        utxo_apply_delete_rows_above(db, 1, 2) &&
+        utxo_apply_unwind_write_cursor(db, 1) &&
+        coins_kv_set_applied_height_in_tx(db, 1) &&
+        exec_sql(db, "COMMIT");
+    UV_CHECK("nf ironwood rewind: rewind txn commits", rewound);
+    UV_CHECK("nf ironwood rewind: rewound rows deleted",
+             uv_nf_rows_at(db, 1) == 0 && uv_nf_rows_at(db, 2) == 0);
+    UV_CHECK("nf ironwood rewind: re-apply has no false duplicate",
+             utxo_apply_stage_drain(100) == 2);
+    UV_CHECK("nf ironwood rewind: cursor back at 3",
+             utxo_apply_stage_cursor() == 3);
+    UV_CHECK("nf ironwood rewind: rows re-revealed",
+             uv_nf_rows_at(db, 1) == 1 && uv_nf_rows_at(db, 2) == 1);
+    UV_CHECK("nf ironwood rewind: no blocker recorded",
+             !blocker_exists("utxo_apply.apply_failed"));
+    uv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
 static int uv_suffix_reconcile_cases(void)
 {
     int failures = 0;
@@ -3567,6 +4033,19 @@ int test_utxo_apply_stage(void)
      * rewind (inverse deltas + log/delta/NULLIFIER deletes + cursor), the
      * SAME blocks re-apply with no false shielded_double_spend. */
     failures += uv_nf_rewind_cases();
+
+    /* Ironwood's opaque v6 image uses checked core views for the same bounded
+     * lifecycle. These bodies are injected below admission deliberately: this
+     * unit proves nullifier persistence and duplicates, not action validity. */
+    failures += uv_nf_ironwood_cross_block_cases();
+    failures += uv_nf_ironwood_intra_block_cases();
+    failures += uv_nf_ironwood_duplicate_action_cases();
+    failures += uv_nf_ironwood_cross_pool_cases();
+    failures += uv_nf_ironwood_malformed_cases();
+    failures += uv_nf_ironwood_mixed_v6_cases();
+    failures += uv_nf_ironwood_wrong_group_cases();
+    failures += uv_nf_ironwood_non_overwintered_cases();
+    failures += uv_nf_ironwood_rewind_cases();
 
     /* A past cursor-only repair could leave shielded kernel rows at future
      * heights. Restart must remove that suffix before the next block fold,

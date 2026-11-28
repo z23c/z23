@@ -19,6 +19,8 @@
 #define SAPLING_TX_VERSION 4
 #define OVERWINTER_VERSION_GROUP_ID 0x03C48270U
 #define SAPLING_VERSION_GROUP_ID 0x892F2085U
+#define IRONWOOD_TX_VERSION 6
+#define IRONWOOD_VERSION_GROUP_ID 0xD884B698U
 
 struct outpoint {
     struct uint256 hash;
@@ -117,6 +119,12 @@ struct js_description {
 #define MAX_SHIELDED_OUTPUTS 4096
 #define MAX_JOINSPLITS 4096
 
+/* Owned full wire image; this is storage only and does not validate v6. */
+struct transaction_v6_wire {
+    uint8_t *data;
+    size_t size;
+};
+
 struct transaction {
     bool overwintered;
     int32_t version;
@@ -138,6 +146,7 @@ struct transaction {
     unsigned char joinsplit_sig[64];
     unsigned char binding_sig[64];
     struct uint256 hash;
+    struct transaction_v6_wire v6_wire;
 };
 
 static inline bool transaction_is_coinbase(const struct transaction *tx)
@@ -147,6 +156,12 @@ static inline bool transaction_is_coinbase(const struct transaction *tx)
 
 void transaction_init(struct transaction *tx);
 void transaction_free(struct transaction *tx);
+
+/* Store a bounded v6 wire image; does not parse or validate its contents.
+ * Failure preserves the previous image and hash. Success invalidates the hash.
+ * The caller supplies its network limit. */
+bool transaction_v6_store_wire(struct transaction *tx, const uint8_t *data,
+                               size_t size, size_t max_size);
 
 /* Allocate vin/vout arrays of null entries. Returns false (and leaves an
  * empty, NULL-array record) when num_vin > MAX_TX_INPUTS or

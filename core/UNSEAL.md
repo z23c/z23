@@ -1318,3 +1318,23 @@ later lane flips it HARD.
 - 2026-11-27T08:12:01Z — REASON: Owner-authorized isolated Ironwood research profile without changing existing chain predicates
   old ROOT: f31d8e1f23e1bddcdc77d717c16bf5fba1457b137974ce8d39f0e7bdc265c52b
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-27T19:18:51Z — REASON: Owner-authorized research Ironwood v6 transaction representation and lifecycle; ordinary network admission remains fail closed
+  old ROOT: a21f5318d314a02fa2651eeb3b8dc23cf4ebd7eaf654992d83e404747371ce82
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-27T19:27:48Z — REASON: Owner-authorized research v6 lifecycle hardening: fail closed serialization and invalidate cached hash after replacement
+  old ROOT: 0289678326be8efad89ea3755162f479882ff9e6bb7448a03d693247843d9d87
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-27T19:30:22Z — REASON: Owner-authorized research v6 fail-closed hash cleanup after serializer refusal
+  old ROOT: 39d705b05c8e265b545f084218446241c45c25a48f1671c903c4a7dad4002e97
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-27T19:56:25Z — REASON: Owner-authorized research v6 common bounded wire parser and exact-frame compatibility
+  old ROOT: 00d4ceec9ecb4808fcdbc024d6f963a93194dad1fbb174c8cb896b03769829d6
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-27T20:01:43Z — REASON: Owner-authorized research v6 parser fail-closed output initialization
+  old ROOT: e528ad038594dfe2b56f1458c6d54c9741a6172eb86683c34120d1d1b05ee92a
+  by: owner unseal ritual (make core-unseal)

@@ -133,7 +133,12 @@ static bool check_action_values(const struct v6_bundle *bundle, const struct v6_
     struct v6_action_view first, second;
     if (!v6_bundle_action(bundle, 0, &first) ||
         !v6_bundle_action(bundle, 1, &second)) return false;
-    if (first.nullifier.size != 32 || first.cmx.size != 32 ||
+    if (bundle->flags.size != 1 || bundle->binding_signature.size != 64 ||
+        bundle->signatures.size != 128 || first.cv.data != bundle->actions.data ||
+        first.rk.data != bundle->actions.data + 64 || first.cv.size != 32 || first.rk.size != 32 ||
+        first.signature.data != bundle->signatures.data || first.signature.size != 64 ||
+        second.signature.data != bundle->signatures.data + 64 || second.signature.size != 64 ||
+        first.nullifier.size != 32 || first.cmx.size != 32 ||
         second.nullifier.size != 32 || second.cmx.size != 32 ||
         memcmp(first.nullifier.data, original->ironwood.actions.data + 32, 32) ||
         memcmp(first.cmx.data, original->ironwood.actions.data + 96, 32)) return false;
@@ -144,7 +149,10 @@ static bool check_action_values(const struct v6_bundle *bundle, const struct v6_
 static bool check_action_failures(const struct v6_wire_view *v, const struct v6_wire_view *absent)
 {
     struct v6_action_view out = { .nullifier = {empty, 1} };
-    return !v6_bundle_action(&v->ironwood, 2, &out) &&
+    struct v6_bundle short_signatures = v->ironwood;
+    short_signatures.signatures.size = 64;
+    return !v6_bundle_action(&short_signatures, 1, &out) &&
+        !v6_bundle_action(&v->ironwood, 2, &out) &&
         !v6_bundle_action(&absent->ironwood, 0, &out) &&
         !v6_bundle_action(NULL, 0, &out) && !v6_bundle_action(&v->ironwood, 0, NULL) &&
         out.nullifier.data == empty && out.nullifier.size == 1;
@@ -169,6 +177,9 @@ static bool check_action_views(void)
     wire[prefix - 1] = 2;
     bool ok = v6_wire_parse(wire, n + 884, &parsed) == V6_WIRE_OK &&
         check_action_values(&parsed.ironwood, &original) && check_action_failures(&parsed, &absent);
+    uint8_t statement[V6_IRONWOOD_STATEMENT_SIZE];
+    ok = ok && v6_ironwood_statement(&parsed, 1, statement, sizeof statement) &&
+        !memcmp(statement + 32, parsed.ironwood.actions.data + 820, 128);
     memmove(wire + prefix - 2, wire + prefix - 1, n + 884 - prefix + 1);
     wire[n + 884 - 1] = 0; /* empty Ironwood follows the Orchard bundle */
     wire[prefix - 1 + 1640] &= 3; /* Orchard supports only its two defined flag bits */
@@ -176,6 +187,32 @@ static bool check_action_views(void)
         !parsed.ironwood.count && check_action_values(&parsed.orchard, &original);
     free(wire);
     return ok;
+}
+
+static bool check_statement_views(void)
+{
+    uint8_t wire[sizeof ironwood_anchor_a], out[V6_IRONWOOD_STATEMENT_SIZE];
+    memcpy(wire, ironwood_anchor_a, sizeof wire);
+    struct v6_wire_view v;
+    if (v6_wire_parse(wire, sizeof wire, &v) != V6_WIRE_OK) return false;
+    uint8_t *flags = (uint8_t *)v.ironwood.flags.data;
+    for (unsigned f = 0; f < 8; ++f) {
+        *flags = (uint8_t)f;
+        if (!v6_ironwood_statement(&v, 0, out, sizeof out) ||
+            memcmp(out, v.ironwood.anchor.data, 32) ||
+            memcmp(out + 32, v.ironwood.actions.data, 128) ||
+            out[160] != (f & 1u) || out[161] != ((f >> 1) & 1u) ||
+            out[162] != ((f & 4u) == 0)) return false;
+    }
+    memset(out, 0xa5, sizeof out);
+    if (v6_ironwood_statement(&v, 0, out, sizeof out - 1) ||
+        v6_ironwood_statement(&v, 1, out, sizeof out) ||
+        v6_ironwood_statement(NULL, 0, out, sizeof out) ||
+        v6_ironwood_statement(&v, 0, NULL, sizeof out)) return false;
+    v.ironwood.flags.size = 0;
+    if (v6_ironwood_statement(&v, 0, out, sizeof out)) return false;
+    for (size_t i = 0; i < sizeof out; ++i) if (out[i] != 0xa5) return false;
+    return true;
 }
 
 static bool check_empty_view(void)
@@ -255,6 +292,33 @@ static bool check_invalid_wire(void)
     memmove(bad + 23, bad + 21, 5); bad[20] = 253; bad[21] = 0; bad[22] = 0;
     return v6_wire_parse(bad, sizeof bad, &v) == V6_WIRE_NONCANONICAL;
 }
+static bool check_prefix_frames(void)
+{
+    uint8_t frames[sizeof empty * 2];
+    memcpy(frames, empty, sizeof empty);
+    memcpy(frames + sizeof empty, empty, sizeof empty);
+    struct v6_wire_view v;
+    size_t consumed = 99;
+    if (v6_wire_parse_prefix(frames, sizeof frames, &v, &consumed) != V6_WIRE_OK ||
+        consumed != sizeof empty || v.header.data != frames) return false;
+    if (v6_wire_parse_prefix(frames + consumed, sizeof empty, &v, &consumed) != V6_WIRE_OK ||
+        consumed != sizeof empty) return false;
+    if (v6_wire_parse(frames, sizeof frames, &v) != V6_WIRE_TRAILING ||
+        v.header.data || v.transparent.data) return false;
+    consumed = 99;
+    if (v6_wire_parse_prefix(frames, sizeof empty - 1, &v, &consumed) == V6_WIRE_OK ||
+        consumed != 0 || v.header.data) return false;
+    consumed = 99;
+    if (v6_wire_parse_prefix(NULL, sizeof empty, &v, &consumed) != V6_WIRE_TRUNCATED ||
+        consumed != 0 || v.header.data) return false;
+    memset(&v, 0xff, sizeof v);
+    if (v6_wire_parse_prefix(frames, sizeof empty, &v, NULL) != V6_WIRE_TRUNCATED ||
+        v.header.data || v.transparent.data) return false;
+    consumed = 99;
+    return v6_wire_parse_prefix(frames, sizeof empty, NULL, &consumed) == V6_WIRE_TRUNCATED &&
+           consumed == 0;
+}
+
 int test_transaction_v6_inspect(void)
 {
     int failures = 0;
@@ -264,12 +328,14 @@ int test_transaction_v6_inspect(void)
     if (!check_empty_rpc()) ++failures;
     if (!check_balance_cases()) ++failures;
     if (!check_action_views()) ++failures;
+    if (!check_statement_views()) ++failures;
     if (!check_empty_view()) ++failures;
     if (!check_empty_digests()) ++failures;
     if (!check_single_cursor()) ++failures;
     if (!check_many_cursor()) ++failures;
     if (!check_ironwood_digest()) ++failures;
     if (!check_invalid_wire()) ++failures;
+    if (!check_prefix_frames()) ++failures;
     printf("v6 wire view: %s\n", failures ? "FAIL" : "PASS");
     return failures;
 }

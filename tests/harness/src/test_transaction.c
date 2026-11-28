@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "test/test_core.h"
+#include "base/safe_alloc.h"
 #include "bloom/bloom.h"
 #include "chain/chainparams.h"
 #include "validation/check_transaction.h"
@@ -1355,10 +1356,73 @@ static int test_tx_js_description_deserialize_groth_trailing(void)
     return failures;
 }
 
+static int test_tx_v6_wire_lifecycle(void)
+{
+    uint8_t wire[24] = {6, 0, 0, 0x80, 0x98, 0xb6, 0x84, 0xd8};
+    struct transaction tx, copy;
+    transaction_init(&tx);
+    tx.overwintered = true;
+    tx.version = IRONWOOD_TX_VERSION;
+    tx.version_group_id = IRONWOOD_VERSION_GROUP_ID;
+    struct byte_stream fresh;
+    struct uint256 hash_out;
+    stream_init(&fresh, 64);
+    bool ok = !transaction_serialize(&tx, &fresh) && fresh.size == 0 &&
+              !transaction_hash_serialized(&tx, &hash_out);
+    stream_free(&fresh);
+    zcl_alloc_fault_fail_next("tx_v6_wire");
+    bool fresh_oom = !transaction_v6_store_wire(&tx, wire, sizeof(wire), sizeof(wire));
+    stream_init(&fresh, 64);
+    ok = ok && fresh_oom && !transaction_serialize(&tx, &fresh) &&
+         fresh.size == 0 && !transaction_hash_serialized(&tx, &hash_out);
+    stream_free(&fresh);
+    tx.hash.data[0] = 7;
+    wire[20] = 42;
+    ok = ok && transaction_v6_store_wire(&tx, wire, sizeof(wire), sizeof(wire)) &&
+         uint256_is_null(&tx.hash);
+    wire[20] = 9;
+    struct byte_stream stream;
+    stream_init(&stream, 64);
+    ok = ok && !transaction_serialize(&tx, &stream) && stream.size == 0;
+    stream_free(&stream);
+    ok = ok && tx.v6_wire.size == sizeof(wire) && tx.v6_wire.data[20] == 42;
+    ok = ok && !transaction_v6_store_wire(&tx, wire, 19, sizeof(wire));
+    ok = ok && !transaction_v6_store_wire(&tx, wire, sizeof(wire), 23);
+    wire[0] = 5;
+    ok = ok && !transaction_v6_store_wire(&tx, wire, sizeof(wire), sizeof(wire));
+    wire[0] = 6;
+    struct transaction decoded;
+    struct byte_stream input;
+    stream_init_from_data(&input, wire, sizeof(wire));
+    bool accepted = transaction_deserialize(&decoded, &input);
+    transaction_free(&decoded);
+    ok = ok && !accepted;
+    ok = ok && tx.v6_wire.size == sizeof(wire) && tx.v6_wire.data[20] == 42;
+    ok = ok && transaction_v6_store_wire(&tx, tx.v6_wire.data, tx.v6_wire.size,
+                                          tx.v6_wire.size);
+    tx.hash.data[0] = 9;
+    zcl_alloc_fault_fail_next("tx_v6_wire");
+    bool allocation_rejected = !transaction_v6_store_wire(&tx, wire, sizeof(wire), sizeof(wire));
+    ok = ok && allocation_rejected && tx.v6_wire.data[20] == 42 && tx.hash.data[0] == 9;
+    zcl_alloc_fault_fail_next("tx_v6_wire");
+    bool copy_failed = !transaction_copy(&copy, &tx);
+    ok = ok && copy_failed && tx.v6_wire.data[20] == 42;
+    bool copied = transaction_copy(&copy, &tx);
+    ok = ok && copied && copy.v6_wire.data != tx.v6_wire.data &&
+         copy.v6_wire.size == sizeof(wire) && copy.v6_wire.data[20] == 42 &&
+         copy.hash.data[0] == 9;
+    transaction_free(&tx);
+    ok = ok && copied && copy.v6_wire.data[20] == 42;
+    if (copied) transaction_free(&copy);
+    printf("transaction v6 wire ownership and copy... %s\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 int test_transaction(void)
 {
     int failures = 0;
 
+    failures += test_tx_v6_wire_lifecycle();
     failures += test_tx_outpoint_alloc_and_value();
     failures += test_tx_coinbase_bloom_and_merkle_roots();
     failures += test_tx_partial_merkle_build_extract();

@@ -49,10 +49,13 @@ void transaction_init(struct transaction *tx)
     memset(tx->joinsplit_sig, 0, 64);
     memset(tx->binding_sig, 0, 64);
     uint256_set_null(&tx->hash);
+    tx->v6_wire = (struct transaction_v6_wire){0};
 }
 
 void transaction_free(struct transaction *tx)
 {
+    free(tx->v6_wire.data);
+    tx->v6_wire = (struct transaction_v6_wire){0};
     free(tx->vin);
     free(tx->vout);
     free(tx->v_shielded_spend);
@@ -140,6 +143,23 @@ bool transaction_alloc(struct transaction *tx, size_t num_vin, size_t num_vout)
     return true;
 }
 
+bool transaction_v6_store_wire(struct transaction *tx, const uint8_t *data,
+                               size_t size, size_t max_size)
+{
+    static const uint8_t header[8] = {6, 0, 0, 0x80, 0x98, 0xb6, 0x84, 0xd8};
+    if (!tx || !data || size < 20 || size > max_size ||
+        !tx->overwintered || tx->version != IRONWOOD_TX_VERSION ||
+        tx->version_group_id != IRONWOOD_VERSION_GROUP_ID ||
+        memcmp(data, header, sizeof(header))) return false;
+    uint8_t *copy = zcl_malloc(size, "tx_v6_wire");
+    if (!copy) return false;
+    memcpy(copy, data, size);
+    free(tx->v6_wire.data);
+    tx->v6_wire = (struct transaction_v6_wire){.data = copy, .size = size};
+    uint256_set_null(&tx->hash);
+    return true;
+}
+
 bool transaction_copy(struct transaction *dst, const struct transaction *src)
 {
     transaction_init(dst);
@@ -149,7 +169,6 @@ bool transaction_copy(struct transaction *dst, const struct transaction *src)
     dst->lock_time = src->lock_time;
     dst->expiry_height = src->expiry_height;
     dst->value_balance = src->value_balance;
-    dst->hash = src->hash;
 
     if (!transaction_alloc(dst, src->num_vin, src->num_vout)) {
         transaction_free(dst);
@@ -211,6 +230,13 @@ bool transaction_copy(struct transaction *dst, const struct transaction *src)
                src->num_joinsplit * sizeof(struct js_description));
     }
 
+    if (src->v6_wire.size &&
+        !transaction_v6_store_wire(dst, src->v6_wire.data, src->v6_wire.size,
+                                   src->v6_wire.size)) {
+        transaction_free(dst);
+        return false;
+    }
+    dst->hash = src->hash;
     dst->joinsplit_pubkey = src->joinsplit_pubkey;
     memcpy(dst->joinsplit_sig, src->joinsplit_sig, 64);
     memcpy(dst->binding_sig, src->binding_sig, 64);
@@ -465,10 +491,9 @@ bool transaction_hash_serialized(const struct transaction *tx,
     struct byte_stream s;
     stream_init(&s, 4096);
     if (!transaction_serialize(tx, &s)) {
+        stream_free(&s);
         LOG_FAIL("transaction",
                  "hash_serialized: serialize failed (alloc or stream)");
-        stream_free(&s);
-        return false;
     }
     hash256(s.data, s.size, out->data);
     stream_free(&s);
@@ -609,6 +634,9 @@ static bool tx_serialize_joinsplits(const struct transaction *tx,
 
 bool transaction_serialize(const struct transaction *tx, struct byte_stream *s)
 {
+    if ((tx->overwintered && tx->version == IRONWOOD_TX_VERSION &&
+         tx->version_group_id == IRONWOOD_VERSION_GROUP_ID) ||
+        tx->v6_wire.data || tx->v6_wire.size) return false;
     bool is_overwinter_v3 = false;
     bool is_sapling_v4 = false;
     if (!tx_serialize_header(tx, s, &is_overwinter_v3, &is_sapling_v4)) return false;

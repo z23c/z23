@@ -16,6 +16,7 @@
 
 #include "primitives/block.h"
 #include "primitives/transaction.h"
+#include "primitives/transaction_v6_wire.h"
 #include "storage/anchor_kv.h"
 #include "storage/coins_kv.h"
 #include "storage/nullifier_kv.h"
@@ -275,9 +276,8 @@ enum utxo_apply_shielded_gate_result utxo_apply_shielded_history_gate(
 }
 
 /* One entry of the per-block nullifier accumulator: the pass-1 same-block
- * check set and the pass-2 insert list. pool 0 = Sprout, 1 = Sapling —
- * SEPARATE namespaces (zclassicd keeps distinct per-pool maps,
- * coins.cpp:166-180; see storage/nullifier_kv.h). */
+ * check set and the pass-2 insert list. Sprout, Sapling and Ironwood are
+ * SEPARATE namespaces (see storage/nullifier_kv.h). */
 struct nf_entry {
     uint8_t nf[32];
     int pool;
@@ -393,11 +393,10 @@ static bool nf_check_one(sqlite3 *db, const uint8_t nf[32], int pool,
     bool found = false;
     if (!nullifier_kv_get(db, nf, pool, &found, NULL))
         return false;  /* store error already logged by nullifier_kv */
-    /* zclassicd per-tx check-then-set order (main.cpp:2627
-     * HaveShieldedRequirements, then SetNullifiers in UpdateCoins): a tx is
-     * checked against the durable set AND the nullifiers of EARLIER txs of
-     * this block ([0, tx_first)), never its own (same-tx duplicates are
-     * rejected upstream by tx_structural, matching CheckTransaction). */
+    /* Legacy pools retain zclassicd's per-tx check-then-set order: their own
+     * entries are indexed at the tx boundary after structural duplicate checks.
+     * Opaque Ironwood has no such upstream admission pass, so its caller indexes
+     * each action immediately and this set also covers earlier actions in it. */
     if (found || nf_index_seen(seen, acc, nf, pool)) {
         summary->ok = false;
         summary->status = "shielded_double_spend";
@@ -412,20 +411,73 @@ static bool nf_check_one(sqlite3 *db, const uint8_t nf[32], int pool,
     return true;
 }
 
-/* Upper bound on the block's nullifier entries (accumulator size). */
-static size_t nf_count_block_nullifiers(const struct block *blk)
+static bool nf_v6_view(const struct transaction *tx,
+                       struct v6_wire_view *view)
+{
+    static const uint8_t expected_header[8] = {
+        6, 0, 0, 0x80, 0x98, 0xb6, 0x84, 0xd8
+    };
+    memset(view, 0, sizeof(*view));
+    bool wire_present = tx->v6_wire.data || tx->v6_wire.size;
+    bool v6_metadata = tx->overwintered && tx->version == IRONWOOD_TX_VERSION;
+    if (!wire_present && !v6_metadata)
+        return true;
+    if (!wire_present || !tx->overwintered ||
+        tx->version != IRONWOOD_TX_VERSION ||
+        tx->version_group_id != IRONWOOD_VERSION_GROUP_ID) {
+        LOG_WARN(NF_SUBSYS,
+                 "[utxo_apply] v6 wire metadata rejected: overwintered=%d "
+                 "version=%d group=%08x", tx->overwintered ? 1 : 0,
+                 tx->version, (unsigned)tx->version_group_id);
+        return false;
+    }
+    enum v6_wire_error error =
+        v6_core_parse(tx->v6_wire.data, tx->v6_wire.size, view);
+    if (error != V6_WIRE_OK || !view->header.data ||
+        view->header.size != 20 ||
+        memcmp(view->header.data, expected_header, sizeof expected_header) != 0) {
+        LOG_WARN(NF_SUBSYS,
+                 "[utxo_apply] malformed opaque v6 wire rejected: error=%d size=%zu",
+                 (int)error, tx->v6_wire.size);
+        memset(view, 0, sizeof(*view));
+        return false;
+    }
+    if (view->sapling_spends.count || view->orchard.count) {
+        LOG_WARN(NF_SUBSYS,
+                 "[utxo_apply] unsupported v6 bundle rejected: sapling_spends=%llu "
+                 "orchard_actions=%llu",
+                 (unsigned long long)view->sapling_spends.count,
+                 (unsigned long long)view->orchard.count);
+        memset(view, 0, sizeof(*view));
+        return false;
+    }
+    return true;
+}
+
+/* Exact bound on the block's nullifier entries (accumulator size). */
+static bool nf_count_block_nullifiers(const struct block *blk, size_t *total_out)
 {
     size_t total = 0;
     for (size_t ti = 0; ti < blk->num_vtx; ti++) {
         const struct transaction *tx = &blk->vtx[ti];
+        if (tx->num_joinsplit > (SIZE_MAX - total) / ZC_NUM_JS_INPUTS)
+            return false;
         total += tx->num_joinsplit * ZC_NUM_JS_INPUTS;
+        if (tx->num_shielded_spend > SIZE_MAX - total)
+            return false;
         total += tx->num_shielded_spend;
+        struct v6_wire_view v6;
+        if (!nf_v6_view(tx, &v6) ||
+            v6.ironwood.count > (uint64_t)(SIZE_MAX - total))
+            return false;
+        total += (size_t)v6.ironwood.count;
     }
-    return total;
+    *total_out = total;
+    return true;
 }
 
 /* Pass-1 outcome for one tx: keep going, consensus-reject (summary->ok is
- * already false), or a store error (already logged below nullifier_kv). */
+ * already false), or a malformed-wire/store error. */
 enum nf_pass1_result {
     NF_PASS1_CONTINUE,
     NF_PASS1_REJECT,
@@ -434,11 +486,15 @@ enum nf_pass1_result {
 
 /* Pass 1 for one tx: check every Sprout JoinSplit nullifier, then every
  * Sapling spend nullifier, against the durable set + the EARLIER-tx
- * accumulator, appending each clean one; then index the tx's entries. */
+ * accumulator. Ironwood uses the same durable/earlier-tx checks and indexes
+ * each action immediately so duplicate actions in one tx are also rejected. */
 static enum nf_pass1_result nf_pass1_accumulate_tx(
     sqlite3 *db, const struct transaction *tx, struct nf_seen_index *seen,
     struct nf_entry *acc, size_t *n, struct delta_summary *summary)
 {
+    struct v6_wire_view v6;
+    if (!nf_v6_view(tx, &v6))
+        return NF_PASS1_STORE_ERROR;
     size_t tx_first = *n;   /* entries below this are EARLIER txs */
     for (size_t i = 0; i < tx->num_joinsplit; i++) {
         for (size_t j = 0; j < ZC_NUM_JS_INPUTS; j++) {
@@ -462,6 +518,23 @@ static enum nf_pass1_result nf_pass1_accumulate_tx(
     }
     if (!nf_index_insert_range(seen, acc, tx_first, *n))
         return NF_PASS1_STORE_ERROR;
+    for (uint64_t i = 0; i < v6.ironwood.count; i++) {
+        struct v6_action_view action;
+        if (!v6_core_bundle_action(&v6.ironwood, i, &action) ||
+            !action.nullifier.data || action.nullifier.size != 32) {
+            LOG_WARN(NF_SUBSYS,
+                     "[utxo_apply] checked Ironwood action view failed at %llu",
+                     (unsigned long long)i);
+            return NF_PASS1_STORE_ERROR;
+        }
+        if (!nf_check_one(db, action.nullifier.data, NULLIFIER_POOL_IRONWOOD,
+                          &tx->hash, seen, acc, n, summary))
+            return NF_PASS1_STORE_ERROR;
+        if (!summary->ok)
+            return NF_PASS1_REJECT;
+        if (!nf_index_insert(seen, acc, *n - 1))
+            return NF_PASS1_STORE_ERROR;
+    }
     return NF_PASS1_CONTINUE;
 }
 
@@ -476,7 +549,13 @@ static bool check_and_insert_nullifiers_impl(struct sqlite3 *db,
                                              int height,
                                              struct delta_summary *summary)
 {
-    size_t total = nf_count_block_nullifiers(blk);
+    size_t total = 0;
+    if (!nf_count_block_nullifiers(blk, &total)) {
+        LOG_WARN(NF_SUBSYS,
+                 "[utxo_apply] invalid or overflowing nullifier count h=%d",
+                 height);
+        return false;
+    }
     if (total == 0)
         return true;
 

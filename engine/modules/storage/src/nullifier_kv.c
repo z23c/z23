@@ -695,7 +695,8 @@ bool nullifier_kv_row_count(sqlite3 *db, int pool, int64_t *count_out)
 {
     if (count_out) *count_out = 0;
     if (!db ||
-        (pool != NULLIFIER_POOL_SPROUT && pool != NULLIFIER_POOL_SAPLING) ||
+        (pool != NULLIFIER_POOL_SPROUT && pool != NULLIFIER_POOL_SAPLING &&
+         pool != NULLIFIER_POOL_IRONWOOD) ||
         !count_out) {
         LOG_WARN("nullifier_kv", "[nullifier_kv] row_count: invalid args");
         return false;

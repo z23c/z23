@@ -297,8 +297,50 @@ static int nk_row_count_reports_each_pool(sqlite3 *db)
         NK_CHECK("row_count sum agrees with combined nk_count",
                  sprout_n + sapling_n == nk_count(db));
         NK_CHECK("row_count rejects an invalid pool",
-                 !nullifier_kv_row_count(db, 2, &sprout_n));
+                 !nullifier_kv_row_count(db, 3, &sprout_n));
     }
+    return failures;
+}
+
+static int nk_ironwood_namespace(sqlite3 *db, const uint8_t nf[32])
+{
+    int failures = 0;
+    bool found = true, sprout = false, sapling = false;
+    int64_t count = -1, height = -1;
+    NK_CHECK("ironwood namespace starts absent", nullifier_kv_get(
+        db, nf, NULLIFIER_POOL_IRONWOOD, &found, NULL) && !found);
+    NK_CHECK("ironwood savepoint begins", sqlite3_exec(
+        db, "SAVEPOINT ironwood_namespace", NULL, NULL, NULL) == SQLITE_OK);
+    NK_CHECK("same nullifier may occur independently in ironwood", nullifier_kv_add(
+        db, nf, NULLIFIER_POOL_IRONWOOD, 250));
+    NK_CHECK("ironwood row persists with its height", nullifier_kv_get(
+        db, nf, NULLIFIER_POOL_IRONWOOD, &found, &height) && found && height == 250);
+    NK_CHECK("ironwood count is separate", nullifier_kv_row_count(
+        db, NULLIFIER_POOL_IRONWOOD, &count) && count == 1);
+    NK_CHECK("other pool rows remain", nullifier_kv_get(
+        db, nf, NULLIFIER_POOL_SPROUT, &sprout, NULL) && sprout && nullifier_kv_get(
+        db, nf, NULLIFIER_POOL_SAPLING, &sapling, NULL) && sapling);
+    NK_CHECK("rewind savepoint begins", sqlite3_exec(
+        db, "SAVEPOINT ironwood_rewind", NULL, NULL, NULL) == SQLITE_OK);
+    NK_CHECK("height rewind removes ironwood row", nullifier_kv_delete_range(
+        db, 250, 250) && nullifier_kv_get(db, nf, NULLIFIER_POOL_IRONWOOD,
+                                           &found, NULL) && !found);
+    NK_CHECK("other pools survive rewind", nullifier_kv_get(
+        db, nf, NULLIFIER_POOL_SPROUT, &sprout, NULL) && sprout && nullifier_kv_get(
+        db, nf, NULLIFIER_POOL_SAPLING, &sapling, NULL) && sapling);
+    NK_CHECK("rewind rollback restores ironwood row", sqlite3_exec(db,
+        "ROLLBACK TO ironwood_rewind; RELEASE ironwood_rewind",
+        NULL, NULL, NULL) == SQLITE_OK && nullifier_kv_get(
+        db, nf, NULLIFIER_POOL_IRONWOOD, &found, &height) && found && height == 250 &&
+        nullifier_kv_get(db, nf, NULLIFIER_POOL_SPROUT, &sprout, NULL) && sprout &&
+        nullifier_kv_get(db, nf, NULLIFIER_POOL_SAPLING, &sapling, NULL) && sapling);
+    NK_CHECK("ironwood savepoint rolls back", sqlite3_exec(db,
+        "ROLLBACK TO ironwood_namespace; RELEASE ironwood_namespace",
+        NULL, NULL, NULL) == SQLITE_OK);
+    NK_CHECK("other pool rows survive rewind rollback", nullifier_kv_get(
+        db, nf, NULLIFIER_POOL_SPROUT, &sprout, NULL) && sprout && nullifier_kv_get(
+        db, nf, NULLIFIER_POOL_SAPLING, &sapling, NULL) && sapling && nullifier_kv_get(
+        db, nf, NULLIFIER_POOL_IRONWOOD, &found, NULL) && !found);
     return failures;
 }
 
@@ -573,6 +615,7 @@ int test_nullifier_kv(void)
 
     failures += nk_add_get_roundtrip_and_pool_separation(db, n1);
     failures += nk_row_count_reports_each_pool(db);
+    failures += nk_ironwood_namespace(db, n1);
     failures += nk_readd_replaces_height(db, n1);
     failures += nk_delete_range_bounds_are_inclusive(db);
     failures += nk_combined_reset_boundary_rolls_back(db, n1);
