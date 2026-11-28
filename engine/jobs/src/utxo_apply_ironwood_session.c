@@ -7,6 +7,7 @@
 #include "primitives/block.h"
 #include "core/serialize.h"
 #include "services/ironwood_resident_params.h"
+#include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -98,6 +99,8 @@ static enum utxo_ironwood_result open_store(struct sqlite3 *db, const struct blo
          * again and only initialize if both tables are genuinely empty. */
     }
     utxo_ironwood_session_reset();
+    if (!db || sqlite3_get_autocommit(db) || !ironwood_checkpoint_ensure_schema(db))
+        return UTXO_IRONWOOD_LOCAL_ERROR;
     enum ironwood_checkpoint_probe_result probe = ironwood_checkpoint_probe(db);
     if (probe == IRONWOOD_CHECKPOINT_PROBE_ERROR) return UTXO_IRONWOOD_LOCAL_ERROR;
     if (probe == IRONWOOD_CHECKPOINT_UNINITIALIZED) return seed_store(db, bi);

@@ -72,7 +72,7 @@ static bool fixture_init(struct session_fixture *f)
         f->index[i].phashBlock = &f->index[i].hashBlock;
         f->index[i].pprev = &f->index[i - 1]; f->index[i].nHeight = i;
     }
-    return sqlite3_open(":memory:", &f->db) == SQLITE_OK && ironwood_checkpoint_ensure_schema(f->db);
+    return sqlite3_open(":memory:", &f->db) == SQLITE_OK;
 }
 static bool sql(sqlite3 *db, const char *statement)
 { return sqlite3_exec(db, statement, NULL, NULL, NULL) == SQLITE_OK; }
@@ -81,6 +81,17 @@ static enum utxo_ironwood_result session_prepare(struct session_fixture *f, int 
 {
     return utxo_ironwood_session_prepare(f->db, &f->index[height], &f->bodies[height],
         session_reader, NULL, f, pending);
+}
+static bool readonly_refusal(struct session_fixture *f)
+{
+    struct utxo_ironwood_pending p, before;
+    memset(&p, 0xa5, sizeof p); memcpy(&before, &p, sizeof p);
+    if (!sql(f->db, "PRAGMA query_only=ON; BEGIN")) return false;
+    enum utxo_ironwood_result r = session_prepare(f, 0, &p);
+    bool ok = r == UTXO_IRONWOOD_LOCAL_ERROR && !memcmp(&p, &before, sizeof p);
+    if (!sql(f->db, "ROLLBACK; PRAGMA query_only=OFF")) return false;
+    utxo_ironwood_session_reset();
+    return ok;
 }
 static bool genesis_cases(struct session_fixture *f)
 {
@@ -116,7 +127,7 @@ static bool first_transaction(struct session_fixture *f)
 {
     struct utxo_ironwood_pending p;
     if (!rollback_first(f)) return false;
-    if (!sql(f->db, "BEGIN") || ironwood_checkpoint_probe(f->db) != IRONWOOD_CHECKPOINT_UNINITIALIZED ||
+    if (!sql(f->db, "BEGIN") || ironwood_checkpoint_probe(f->db) != IRONWOOD_CHECKPOINT_PROBE_ERROR ||
         session_prepare(f, 1, &p) != UTXO_IRONWOOD_OK || !utxo_ironwood_session_publish(&p) ||
         !sql(f->db, "COMMIT")) return false;
     if (!sql(f->db, "BEGIN") || session_prepare(f, 2, &p) != UTXO_IRONWOOD_OK ||
@@ -152,7 +163,7 @@ static bool corruption_refused(struct session_fixture *f)
 int test_utxo_apply_ironwood_session(void)
 {
     struct session_fixture f = {0};
-    bool ok = fixture_init(&f) && genesis_cases(&f) && first_transaction(&f) && cold_replay(&f) && corruption_refused(&f);
+    bool ok = fixture_init(&f) && readonly_refusal(&f) && genesis_cases(&f) && first_transaction(&f) && cold_replay(&f) && corruption_refused(&f);
     utxo_ironwood_session_reset();
     if (f.db && sqlite3_close(f.db) != SQLITE_OK) ok = false;
     for (size_t i = 0; i < 4; ++i) block_free(&f.bodies[i]);
