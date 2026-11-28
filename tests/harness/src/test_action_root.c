@@ -526,6 +526,16 @@ static void test_derive_builtin_dirs(struct fx *x,
 }
 
 #if !defined(_WIN32)
+static bool test_toolchain_paths(const char *kit, char include[PATH_MAX],
+                                 char bin[PATH_MAX], char raw[PATH_MAX])
+{
+    int a = snprintf(include, PATH_MAX, "%s/include", kit);
+    int b = snprintf(bin, PATH_MAX, "%s/bin", kit);
+    int c = snprintf(raw, PATH_MAX, "%s/bin/../include", kit);
+    return a > 0 && a < PATH_MAX && b > 0 && b < PATH_MAX &&
+           c > 0 && c < PATH_MAX;
+}
+
 static void test_toolchain_directory_binding(struct fx *x)
 {
     char tmp[PATH_MAX], kit[PATH_MAX], include[PATH_MAX] = {0};
@@ -535,10 +545,21 @@ static void test_toolchain_directory_binding(struct fx *x)
     AR_CHECK("toolchain fixture is canonical", canonical);
     if (!canonical)
         return;
-    bool ok = snprintf(include, sizeof(include), "%s/include", kit) < (int)sizeof(include) &&
-              snprintf(bin, sizeof(bin), "%s/bin", kit) < (int)sizeof(bin) &&
-              snprintf(raw, sizeof(raw), "%s/bin/../include", kit) < (int)sizeof(raw) &&
-              mkdir(include, 0700) == 0 && mkdir(bin, 0700) == 0;
+    bool paths_ok = test_toolchain_paths(kit, include, bin, raw);
+    AR_CHECK("toolchain fixture paths fit", paths_ok);
+    if (!paths_ok) {
+        (void)rmdir(kit);
+        return;
+    }
+    bool include_owned = mkdir(include, 0700) == 0;
+    bool bin_owned = include_owned && mkdir(bin, 0700) == 0;
+    AR_CHECK("toolchain fixture directories created", include_owned && bin_owned);
+    if (!bin_owned) {
+        if (include_owned) (void)rmdir(include);
+        (void)rmdir(kit);
+        return;
+    }
+    bool ok = true;
     const char *roots[] = { kit };
     const char *raw_dirs[] = { raw };
     const char *saved = x->system_dirs[0];
@@ -558,15 +579,18 @@ static void test_toolchain_directory_binding(struct fx *x)
     x->req.system_dirs = NULL;
     ok = ok && fx_miss(x, "request_incomplete");
     x->req.system_dirs = x->system_dirs;
-    ok = ok && rmdir(bin) == 0 && symlink("include", bin) == 0 &&
-         fx_miss(x, "builtin_dir_noncanonical");
+    bool removed = ok && rmdir(bin) == 0;
+    bin_owned = !removed;
+    bool link_owned = removed && symlink("include", bin) == 0;
+    ok = link_owned && fx_miss(x, "builtin_dir_noncanonical");
     x->req.system_dirs_raw = NULL;
     x->req.toolchain_roots = NULL;
     x->req.toolchain_root_count = 0;
     ok = ok && fx_miss(x, "include_dir_outside_repo");
     x->system_dirs[0] = saved;
-    (void)unlink(bin);
-    (void)rmdir(include);
+    if (link_owned) (void)unlink(bin);
+    if (bin_owned) (void)rmdir(bin);
+    if (include_owned) (void)rmdir(include);
     (void)rmdir(kit);
     AR_CHECK("toolchain paths: bounded search succeeds, symlink retarget and "
              "unbound external root refuse", ok);
