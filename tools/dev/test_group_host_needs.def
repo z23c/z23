@@ -591,6 +591,7 @@ ZCL_TEST_GROUP_BUILD_NEED("test_device_host_runtime", "build/bin/tunnel", "nativ
 ZCL_TEST_GROUP_BUILD_NEED("test_device_host_runtime", "build/bin/fbsh", "fbsh")
 ZCL_TEST_GROUP_BUILD_NEED("test_device_command", "build/bin/z23", "z23")
 ZCL_TEST_GROUP_BUILD_NEED("test_boot_ballot_catalog", "build/bin/z23", "z23")
+ZCL_TEST_GROUP_BUILD_NEED("test_ironwood_node_e2e", "build/bin/z23", "z23")
 ZCL_TEST_GROUP_BUILD_NEED("test_zcode_package_artifact", "build/bin/z23", "z23")
 
 /* app_seed_skycombat seeds, builds and runs the real game on a private Xvfb
