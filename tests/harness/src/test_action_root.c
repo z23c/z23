@@ -3173,9 +3173,10 @@ static void observation_driver_refusals(struct observation_fixture *fixture)
     (void)unlink(driver);
 }
 
-static void observation_driver_chain_refusal(struct observation_fixture *fixture)
+static void observation_driver_chain(struct observation_fixture *fixture)
 {
     struct zcl_compile_observation *observation = NULL;
+    struct zcl_action_root_result result = {0};
     char driver[PATH_MAX];
     (void)snprintf(driver, sizeof(driver), "%s/cc", fixture->root);
     const char *original = fixture->argv[0];
@@ -3185,8 +3186,23 @@ static void observation_driver_chain_refusal(struct observation_fixture *fixture
                   symlink("cc-link", driver) == 0;
     fixture->argv[0] = driver;
     observation = NULL;
-    AR_CHECK("observation refuses an intermediate compiler symlink",
-             linked && !observation_begin(fixture, &observation));
+    bool ready = linked && observation_begin(fixture, &observation) &&
+                 observation_compile(observation);
+    AR_CHECK("observation accepts a stable compiler symlink chain",
+             ready && zcl_compile_observation_finish(observation, true, &result));
+    zcl_action_root_result_free(&result);
+    zcl_compile_observation_close(observation);
+    observation = NULL;
+    ready = linked && observation_begin(fixture, &observation) &&
+            observation_compile(observation);
+    bool retargeted = ready && unlink(intermediate) == 0 &&
+                      symlink("/usr/bin/false", intermediate) == 0 &&
+                      unlink(intermediate) == 0 &&
+                      symlink(fixture->compiler, intermediate) == 0;
+    AR_CHECK("observation refuses a restored intermediate link retarget",
+             retargeted && !zcl_compile_observation_finish(observation, true, &result) &&
+             strcmp(result.miss, "toolchain_changed") == 0);
+    zcl_action_root_result_free(&result);
     zcl_compile_observation_close(observation);
     fixture->argv[0] = original;
     (void)unlink(driver);
@@ -3326,7 +3342,7 @@ static void test_compile_observation(void)
     observation_swapped_depfile(&fixture);
     observation_window_refusals(&fixture);
     observation_driver_refusals(&fixture);
-    observation_driver_chain_refusal(&fixture);
+    observation_driver_chain(&fixture);
     test_rm_rf_recursive(fixture.root);
 }
 #endif

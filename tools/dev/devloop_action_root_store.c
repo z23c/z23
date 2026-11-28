@@ -1989,23 +1989,34 @@ static const char *ars_driver_miss_why(const char *code)
 /* The plan's driver facts under the child environment, then the bytes of
  * every program a compile runs. */
 #if !defined(_WIN32)
-static bool ars_exec_direct_link(const char *path, struct stat *st)
+/* Follow one symlink as the kernel would, retaining its unresolved suffix.
+ * The caller restarts the component walk and checks every encountered hop. */
+static bool ars_exec_follow_link(char path[PATH_MAX], size_t pos,
+                                 struct sha3_256_ctx *sha)
 {
-    char target[PATH_MAX], joined[PATH_MAX], norm[PATH_MAX], real[PATH_MAX];
+    char target[PATH_MAX], joined[PATH_MAX];
+    char saved = path[pos];
+    path[pos] = '\0';
     ssize_t used = readlink(path, target, sizeof(target) - 1);
+    path[pos] = saved;
     if (used <= 0 || (size_t)used >= sizeof(target) - 1)
         return false;
     target[used] = '\0';
-    const char *slash = strrchr(path, '/');
+    if (sha) {
+        sha3_256_write(sha, (const uint8_t *)path, pos);
+        sha3_256_write(sha, (const uint8_t *)"\0", 1);
+        sha3_256_write(sha, (const uint8_t *)target, (size_t)used + 1);
+    }
+    size_t parent = pos;
+    while (parent > 0 && path[parent - 1] != '/') parent--;
+    if (parent == 0) return false;
     int written = target[0] == '/'
-        ? snprintf(joined, sizeof(joined), "%s", target)
-        : snprintf(joined, sizeof(joined), "%.*s/%s",
-                   (int)(slash - path), path, target);
-    return written >= 0 && written < (int)sizeof(joined) &&
-           zcl_action_root_lex_normalize(joined, norm, sizeof(norm)) &&
-           realpath(joined, real) && strcmp(norm, real) == 0 &&
-           lstat(joined, st) == 0 && !S_ISLNK(st->st_mode) &&
-           lstat(path, st) == 0 && S_ISLNK(st->st_mode);
+        ? snprintf(joined, sizeof(joined), "%s%s", target, path + pos)
+        : snprintf(joined, sizeof(joined), "%.*s%s%s",
+                   (int)parent, path, target, path + pos);
+    if (written <= 0 || written >= (int)sizeof(joined)) return false;
+    memcpy(path, joined, (size_t)written + 1);
+    return true;
 }
 
 static bool ars_exec_stamp_stable(const struct stat *st,
@@ -2022,13 +2033,14 @@ static bool ars_exec_stamp_stable(const struct stat *st,
 }
 
 static bool ars_exec_path_stable(const char *word,
-                                 const struct zcl_action_root_t0 *t0)
+                                 const struct zcl_action_root_t0 *t0,
+                                 struct sha3_256_ctx *sha)
 {
     char path[PATH_MAX];
     if (snprintf(path, sizeof(path), "%s", word) >= (int)sizeof(path) ||
         !ars_resolve_program(path))
         return false;
-    size_t n = strlen(path);
+    size_t n = strlen(path), links = 0;
     for (size_t i = 1; i <= n; i++) {
         if (path[i] != '/' && path[i] != '\0')
             continue;
@@ -2039,28 +2051,37 @@ static bool ars_exec_path_stable(const char *word,
         path[i] = saved;
         if (!ok)
             return false;
-        if (S_ISLNK(st.st_mode) && (i != n || !ars_exec_direct_link(path, &st)))
-            return false;
         if (!ars_exec_stamp_stable(&st, t0))
             return false;
+        if (S_ISLNK(st.st_mode)) {
+            if (++links > 40 || !ars_exec_follow_link(path, i, sha))
+                return false;
+            n = strlen(path);
+            i = 0;
+        }
     }
     return true;
 }
 
 static bool ars_exec_paths_stable(const struct ars_compile *k,
-                                  const struct ars_driver *d)
+                                  const struct ars_driver *d, uint8_t out[32])
 {
     char text[512];
     const char *words[ARS_ARG_MAX];
     if (snprintf(text, sizeof(text), "%s", k->cc) >= (int)sizeof(text))
         return false;
+    static const char domain[] = "zcl.action_root.compiler_symlinks.v1";
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
     size_t n = zcl_argv_split(text, words, ARS_ARG_MAX);
     for (size_t i = 0; i < n && words[i][0] != '-'; i++)
-        if (!ars_exec_path_stable(words[i], k->t0))
+        if (!ars_exec_path_stable(words[i], k->t0, &sha))
             return false;
     for (size_t i = 0; i < d->backend_n; i++)
-        if (!ars_exec_path_stable(d->backend[i], k->t0))
+        if (!ars_exec_path_stable(d->backend[i], k->t0, &sha))
             return false;
+    sha3_256_finalize(&sha, out);
     return true;
 }
 #endif
@@ -2096,7 +2117,8 @@ static bool ars_hook_driver(struct ars_hook *h, const struct ars_compile *k,
     (void)backend;
     return false;
 #else
-    if (!ars_exec_paths_stable(k, &h->driver)) {
+    uint8_t links[32], links_after[32];
+    if (!ars_exec_paths_stable(k, &h->driver, links)) {
         ars_miss_set(m, "input_changed_during_compile",
                      "compiler path changed during the compile", k->cc);
         return false;
@@ -2109,11 +2131,19 @@ static bool ars_hook_driver(struct ars_hook *h, const struct ars_compile *k,
                      bad ? bad : k->cc);
         return false;
     }
-    if (!ars_exec_paths_stable(k, &h->driver)) {
+    if (!ars_exec_paths_stable(k, &h->driver, links_after) ||
+        memcmp(links, links_after, sizeof(links)) != 0) {
         ars_miss_set(m, "input_changed_during_compile",
                      "compiler path changed while reading it", k->cc);
         return false;
     }
+    struct sha3_256_ctx sha;
+    static const char domain[] = "zcl.action_root.backend_and_links.v1";
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, backend, 32);
+    sha3_256_write(&sha, links, sizeof(links));
+    sha3_256_finalize(&sha, backend);
     return true;
 #endif
 }
@@ -3061,10 +3091,10 @@ bool zcl_compile_observation_finish(struct zcl_compile_observation *o,
         memcmp(identity, o->identity, 32) == 0;
 #if !defined(_WIN32)
     if (same)
-        same = ars_exec_path_stable(o->argv[0], &o->hook.req.compile_t0);
+        same = ars_exec_path_stable(o->argv[0], &o->hook.req.compile_t0, NULL);
     for (size_t i = 0; same && i < o->hook.driver.backend_n; i++)
         same = ars_exec_path_stable(o->hook.driver.backend[i],
-                                    &o->hook.req.compile_t0);
+                                    &o->hook.req.compile_t0, NULL);
 #endif
     free(current);
     if (!same)
