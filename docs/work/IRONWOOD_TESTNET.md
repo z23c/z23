@@ -56,11 +56,11 @@ A node profile needs an explicit startup selector, a separate base datadir and w
 
 Miners on the private research network continue mining with Equihash (48,5). Slot 0 proposes an inclusive 200,000-byte limit on the serialized block. Slot 1 proposes freezing new net deposits into Sapling. Miners signal each proposal separately in the coinbase. In the 20-block qualification window, a slot needs at least 19 votes. Test both 19/18 and 18/19 outcomes.
 
-The selected release history is a fresh private chain with the fixed genesis above, a separate release identity and data directory. Preserve the existing rehearsal history. The selected schedule activates Overwinter and Sapling at height 0; it does not change the sealed research descriptor described above. Start the pool at height 1 only after the full verifier is ready. During heights 1–120, mature a protected mining reward, fund Sapling notes, and exercise v6 deposit and spend paths.
+The selected release history is a fresh private chain with the fixed genesis above, a separate release identity and data directory. Preserve the existing rehearsal history. The selected schedule activates Overwinter and Sapling at height 0. The sealed rehearsal descriptor retains its historical settings. Start the Ironwood v6 shielded pool at height 1 only after the full verifier is ready. During heights 1–120, mature a protected mining reward, fund Sapling notes, and exercise v6 deposit and spend paths.
 
 The ballot window is inclusive at heights 121–140, with at least 19 of 20 votes required independently for each slot. If slot 0 locks in, its block-size cap activates at height 143. If slot 1 locks in, its Sapling deposit freeze activates at height 144. Equihash (48,5) remains the mining algorithm.
 
-This is a selected schedule, not evidence that it has been implemented or qualified. Before release, verify the 200,000/200,001-byte boundary with mined blocks, spend a mature protected mining reward, confirm withdrawals during the freeze, replay a fork that changes the decisive vote, and verify a clean sync from genesis. The release catalog and its authenticated pin must be produced and verified for this schedule; the example catalog below is not that pin.
+Qualification remains open. Before release, verify the 200,000/200,001-byte boundary with mined blocks, spend a mature protected mining reward, confirm withdrawals during the freeze, and replay a fork that changes the decisive vote. Verify a clean sync from genesis through height 28 via normal startup, where the old history diverged. Use a separately authenticated release catalog for the selected heights. The example catalog below is not the release pin.
 
 ## Example ballot round (not the release schedule)
 
