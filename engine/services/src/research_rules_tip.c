@@ -41,9 +41,11 @@ struct research_tip_rules research_rules_tip(void)
     if (!research_rules_binding()) return (struct research_tip_rules){0};
     struct chain_state_repository *csr = csr_instance();
     pthread_mutex_lock(&csr->lock);
-    struct block_index *tip = csr->initialized && csr->chain_active
-        ? active_chain_tip(csr->chain_active) : NULL;
+    struct active_chain *chain = csr->initialized ? csr->chain_active : NULL;
     pthread_mutex_unlock(&csr->lock);
+    /* active_chain_tip may consult progress authority; never hold csr->lock
+     * across it (the repository snapshot contract forbids that lock edge). */
+    struct block_index *tip = chain ? active_chain_tip(chain) : NULL;
     return research_rules_tip_for_parent(tip);
 }
 
