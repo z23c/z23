@@ -9,6 +9,7 @@
 #include "domain/consensus/equihash.h"
 #include "json/json.h"
 #include "primitives/block.h"
+#include "util/spawn.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,15 +27,17 @@ static bool read_fixture(char *text, size_t cap)
 
 static int run_worker(const char *path, char *output, size_t cap)
 {
-    char command[2048];
-    if (snprintf(command, sizeof command, "build/bin/z23_ironwood_template_worker '%s' 2>/dev/null", path) >= (int)sizeof command) return -1;
-    FILE *p = popen(command, "r");
-    if (!p) return -1;
-    size_t n = fread(output, 1, cap - 1, p);
+    if (!output || cap < 2) return -1;
+    output[0] = '\0';
+    const char *const argv[] = {"build/bin/z23_ironwood_template_worker", path, NULL};
+    struct zcl_spawn_binary_observation obs = {0};
+    struct zcl_result result = zcl_spawn_capture_binary(argv, output, cap - 1, 120000, &obs);
+    if (!obs.exit_observed || obs.timed_out || obs.overflow || !obs.eof || obs.output_len >= cap) return -1;
+    size_t n = obs.output_len;
     if (n && output[n - 1] == '\n') --n;
     output[n] = '\0';
-    int status = pclose(p);
-    return status == 0 ? 0 : 1;
+    if (result.ok && obs.exit_code == 0) return 0;
+    return obs.exit_code == 1 ? 1 : -1;
 }
 
 static bool check_block(const char *hex, const char *fixture)
@@ -86,7 +89,7 @@ static bool reject_mutation(const char *text, const char *needle, const char *re
         fputs(replacement, f) >= 0 && fputs(p + strlen(needle), f) >= 0;
     if (fclose(f)) ok = false;
     char output[8192];
-    if (ok) ok = run_worker(path, output, sizeof output) != 0 && output[0] == '\0';
+    if (ok) ok = run_worker(path, output, sizeof output) == 1 && output[0] == '\0';
     return ok;
 }
 
@@ -97,7 +100,7 @@ int test_ironwood_template_worker(void)
         run_worker("tests/fixtures/ironwood/gbt-coinbase-template.json", output, sizeof output) == 0 &&
         check_block(output, fixture) && test_mkdtemp(dir, sizeof dir, "ironwood_gbt");
     if (ok) {
-        snprintf(path, sizeof path, "%s/invalid.json", dir);
+        snprintf(path, sizeof path, "%s/with'quote.json", dir);
         ok = reject_mutation(fixture, "\"transactions\":[]", "\"transactions\":[{}]", path) &&
              reject_mutation(fixture, "\"version\":4", "\"version\":5", path) &&
              reject_mutation(fixture, "200f0f0f", "200f0f0g", path) &&
