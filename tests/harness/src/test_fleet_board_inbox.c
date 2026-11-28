@@ -1464,6 +1464,8 @@ static int test_fbi_cli_no_row_budget(void)
     return failures;
 }
 
+#include "test_fleet_board_inbox_oversized.inc"
+
 int test_fleet_board_inbox(void)
 {
     int failures = 0;
@@ -1485,5 +1487,6 @@ int test_fleet_board_inbox(void)
     failures += test_fbi_cli_budget();
     failures += test_fbi_cli_worst_budget();
     failures += test_fbi_cli_no_row_budget();
+    failures += test_fbi_cli_oversized_wire();
     return failures;
 }

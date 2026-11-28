@@ -324,7 +324,7 @@ static bool fbi_page_project(const struct zcl_command_request *request,
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_FAILED, "BOARD_PAGE_BUDGET",
                                "serialize", false, false,
-                               "the inbox page could not fit or be allocated",
+                               "the inbox page could not fit or be allocated; lower text_max",
                                "fleet.board.inbox");
     }
     json_free(&measured);
