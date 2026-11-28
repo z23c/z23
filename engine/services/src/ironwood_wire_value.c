@@ -89,7 +89,7 @@ static struct zcl_result fold_wire_value(const struct ironwood_postnu63_stage *s
     bool ok = init_sums(&w, stage->x1);
     /* Reverse accumulation order permits Horner folding with one scalar per slot. */
     while (ok && count) {
-        struct ironwood_opening_query q;
+        struct ironwood_opening_query q = {0};
         ok = ironwood_postnu63_query_at(stage->actions, --count, &q).ok && wire_value_accumulate(&w, &q, stage, h);
     }
     struct ironwood_multiopen_set sets[IRONWOOD_MULTIOPEN_SETS] = {0};

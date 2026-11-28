@@ -36,7 +36,7 @@ struct query_context {
 static struct zcl_result query_item(void *context, size_t ordinal, struct ironwood_multiopen_commitment *out)
 {
     const struct query_context *c = context;
-    struct ironwood_opening_query query;
+    struct ironwood_opening_query query = {0};
     struct zcl_result r = ironwood_postnu63_query_at(c->stage->actions, ordinal, &query);
     if (!r.ok) return r;
     struct ironwood_multiopen_commitment item = { .group = query.set };

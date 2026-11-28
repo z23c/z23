@@ -63,7 +63,7 @@ struct zcl_result ironwood_postnu63_pinned_h(const struct ironwood_postnu63_stag
     const struct ironwood_postnu63_constraint_programs *programs, uint8_t out[32])
 {
     if (!programs || !out) return ZCL_ERR(-1, "Missing pinned constraint input");
-    size_t terms_size;
+    size_t terms_size = 0;
     struct zcl_result r = pinned_stage_size(stage, &terms_size);
     if (!r.ok) return r;
     uint8_t *work = zcl_malloc(PROGRAM_SIZE + terms_size, "PostNu6_3 constraint programs");
