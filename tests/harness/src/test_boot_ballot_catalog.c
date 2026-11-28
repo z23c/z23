@@ -145,6 +145,18 @@ static bool binary_fresh(void)
     return true;
 }
 
+static void binary_child(const char *home, const char *arg, FILE *capture)
+{
+    alarm(10);
+    int nullfd = open("/dev/null", O_WRONLY);
+    if (nullfd < 0 || dup2(nullfd, STDOUT_FILENO) < 0 ||
+        dup2(fileno(capture), STDERR_FILENO) < 0 || setenv("HOME", home, 1))
+        _exit(127);
+    close(nullfd);
+    execl("build/bin/z23", "z23", arg, "-testnet-profile=ironwood", (char *)NULL);
+    _exit(127);
+}
+
 static bool binary_refuse(const char *home, const char *parent, int *rc, char *out, size_t cap)
 {
     char arg[1024];
@@ -152,16 +164,7 @@ static bool binary_refuse(const char *home, const char *parent, int *rc, char *o
     FILE *capture = tmpfile();
     if (!capture) return false;
     pid_t child = fork();
-    if (child == 0) {
-        alarm(10);
-        int nullfd = open("/dev/null", O_WRONLY);
-        if (nullfd < 0 || dup2(nullfd, STDOUT_FILENO) < 0 ||
-            dup2(fileno(capture), STDERR_FILENO) < 0 || setenv("HOME", home, 1))
-            _exit(127);
-        close(nullfd);
-        execl("build/bin/z23", "z23", arg, "-testnet-profile=ironwood", (char *)NULL);
-        _exit(127);
-    }
+    if (child == 0) binary_child(home, arg, capture);
     int status = 0;
     bool ok = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status);
     *rc = ok ? WEXITSTATUS(status) : -1;
@@ -183,10 +186,28 @@ static bool write_fixture_file(const char *path, const char *text)
     return fclose(f) == 0 && ok;
 }
 
+static bool binary_marked_fixture(const char *dir, const char *marker, const char *sentinel,
+                                  struct snapshot *before)
+{
+    return mkdir(dir, 0700) == 0 &&
+        write_fixture_file(marker, "z23-research-profile:ironwood:v1\n") &&
+        write_fixture_file(sentinel, "untouched\n") && chmod(dir, 0755) == 0 &&
+        snapshot_tree(dir, "", before);
+}
+
+static bool binary_unchanged(const char *dir, bool existing, const struct snapshot *before)
+{
+    struct stat st;
+    struct snapshot after = {0};
+    return existing ? stat(dir, &st) == 0 && (st.st_mode & 0777) == 0755 &&
+        snapshot_tree(dir, "", &after) && snapshot_equal(before, &after) :
+        lstat(dir, &st) != 0 && errno == ENOENT;
+}
+
 static int binary_consent_case(bool existing)
 {
     char home[512], parent[600], dir[700], marker[800], sentinel[800], output[4096] = {0};
-    struct snapshot before = {0}, after = {0};
+    struct snapshot before = {0};
     int rc = -1;
     if (!test_mkdtemp(home, sizeof(home), "ballot_binary")) return 1;
     snprintf(parent, sizeof(parent), "%s/parent", home);
@@ -195,15 +216,11 @@ static int binary_consent_case(bool existing)
     snprintf(sentinel, sizeof(sentinel), "%s/sentinel", dir);
     bool ready = mkdir(parent, 0700) == 0;
     if (ready && existing)
-        ready = mkdir(dir, 0700) == 0 &&
-            write_fixture_file(marker, "z23-research-profile:ironwood:v1\n") &&
-            write_fixture_file(sentinel, "untouched\n") && chmod(dir, 0755) == 0 &&
-            snapshot_tree(dir, "", &before);
+        ready = binary_marked_fixture(dir, marker, sentinel, &before);
     bool refused = ready && binary_refuse(home, parent, &rc, output, sizeof(output));
-    struct stat st;
-    bool unchanged = existing ? stat(dir, &st) == 0 && (st.st_mode & 0777) == 0755 &&
-        snapshot_tree(dir, "", &after) && snapshot_equal(&before, &after) :
-        lstat(dir, &st) != 0 && errno == ENOENT;
+    bool unchanged = binary_unchanged(dir, existing, &before);
+    if (refused && unchanged)
+        printf("binary consent %s: rc=%d stderr=%s", existing ? "marked" : "absent", rc, output);
     if (!refused || !unchanged)
         fprintf(stderr, "binary consent %s: refused=%d rc=%d unchanged=%d output=%s\n",
                 existing ? "marked" : "absent", refused, rc, unchanged, ready ? output : "(setup failed)");
