@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: the Receive screen's node queries, run while that screen is shown.
- * Empty until lane P2 adds them; Home's queries live in zw_queries.c. */
+ * Empty on purpose: Receive shows addresses Home already loaded. */
 #include "zw.h"
 
 void zw_q_receive_poll(struct zw_worker *w, const struct zw_model *m)

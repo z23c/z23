@@ -1824,10 +1824,95 @@ static void test_node_line_send_wording(void)
     scene_free(&s);
 }
 
+static struct zw_balances *receive_row(const char *addr, uint8_t kind)
+{
+    struct zw_balances *bal = calloc(1, sizeof(*bal));
+    if (!bal) return NULL;
+    bal->n = 1;
+    snprintf(bal->rows[0].addr, sizeof(bal->rows[0].addr), "%s", addr);
+    bal->rows[0].kind = kind;
+    return bal;
+}
+
+static void test_receive_refuses(void)
+{
+    struct zw_model m;
+    struct zw_balances *bal = receive_row(SEND_Z1, ZW_ADDR_SAPLING);
+    zw_model_init(&m, ZW_PROFILE_Z23);
+    m.bal = bal;
+    CHECK("receive needs a balance list", bal != NULL);
+    if (!bal) return;
+    CHECK("offline receive address stays hidden", zw_receive_address(&m) == NULL);
+    m.conn = ZW_CONN_ONLINE;
+    CHECK("online receive address is the stored sapling",
+          bal && zw_receive_address(&m) == bal->rows[0].addr &&
+          zw_addr_check(bal->rows[0].addr) == ZW_AT_SAPLING);
+    snprintf(m.rcv.fresh_z, sizeof(m.rcv.fresh_z), "%s", SEND_Z0);
+    CHECK("a freshly issued address is the one to share",
+          zw_receive_address(&m) == m.rcv.fresh_z);
+    m.rcv.fresh_z[0] = '\0';
+    snprintf(bal->rows[0].addr, sizeof(bal->rows[0].addr), "%s", SEND_T1);
+    bal->rows[0].kind = ZW_ADDR_PUBLIC;
+    CHECK("a public address is not a receive address", zw_receive_address(&m) == NULL);
+    zw_model_free(&m);
+}
+
+static bool receive_copied(struct scene *s, const char *want)
+{
+    const struct gui_node *n = node_of(s, "r_address");
+    struct gui_action act;
+    struct gui_event click = { .type = GUI_EV_MOUSE_BUTTON };
+    struct gui_event key = { .type = GUI_EV_KEY, .mods = GUI_MOD_CTRL };
+    char clip[128];
+    size_t nclip;
+    if (!n || !(n->flags & GUI_F_FOCUSABLE) || !(n->flags & GUI_F_SELECTABLE)) return false;
+    click.button.x = n->frame.x + n->frame.w / 2;
+    click.button.y = n->frame.y + n->frame.h / 2;
+    click.button.button = 1;
+    click.button.down = true;
+    click.button.clicks = 1;
+    (void)gui_ui_event(s->ui, &click, &act);
+    if (strcmp(s->ui->focus, "r_address") != 0) return false;
+    key.key.key = GUI_KEY_C;
+    key.key.down = true;
+    (void)gui_ui_event(s->ui, &key, &act);
+    nclip = gui_clipboard_get_text(s->win, clip, sizeof(clip));
+    return nclip == strlen(want) && !strcmp(clip, want);
+}
+
+static void test_receive_screen(void)
+{
+    struct scene s = {0};
+    const char *shown;
+    const char *note;
+    const char *want;
+    zw_model_init(&s.m, ZW_PROFILE_Z23);
+    s.m.conn = ZW_CONN_ONLINE;
+    s.m.bal = receive_row(SEND_T1, ZW_ADDR_PUBLIC);
+    if (s.m.bal) {
+        s.m.bal->n = 2;
+        snprintf(s.m.bal->rows[1].addr, sizeof(s.m.bal->rows[1].addr), "%s", SEND_Z1);
+        s.m.bal->rows[1].kind = ZW_ADDR_SAPLING;
+    }
+    scene_render(&s, ZW_SCREEN_RECEIVE, 1100, 720, 1.0f);
+    shown = gui_ui_get(s.ui, "receive.address");
+    note = gui_ui_get(s.ui, "receive.note");
+    want = s.m.bal ? s.m.bal->rows[1].addr : "";
+    CHECK("receive screen shows the private address",
+          s.m.bal && shown && zw_receive_address(&s.m) == want &&
+          !strcmp(shown, want) && strcmp(shown, s.m.bal->rows[0].addr) != 0);
+    CHECK("receive note tells the user the payment stays private",
+          note && strstr(note, "does not reveal") != NULL);
+    CHECK("clicking the address copies it", receive_copied(&s, want));
+    scene_free(&s);
+}
+
 int test_z23wallet(void)
 {
     printf("\n=== z23wallet ===\n");
     g_fail = 0;
+    test_receive_refuses();
+    test_receive_screen();
     test_bench_host_memory();
     test_amount();
     test_age_and_version();

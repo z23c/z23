@@ -280,5 +280,6 @@ void zw_model_publish(const struct zw_model *m, struct gui_ui *ui, int64_t now_s
     if (m->conn == ZW_CONN_WARMING && m->warm_percent >= 0) snprintf(pm, sizeof(pm), "%d", m->warm_percent * 10);
     gui_ui_set(ui, "connect.progress", pm);
     zw_home_publish(m, ui, now_s);
+    zw_receive_publish(m, ui);
     zw_advanced_publish(m, ui);
 }

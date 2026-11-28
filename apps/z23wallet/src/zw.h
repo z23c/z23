@@ -221,7 +221,7 @@ struct zw_model {
     struct zw_info info;
     struct zw_wallet wallet;
     struct zw_balances *bal; /* owned; NULL until both unspent lists answered */
-    struct zw_receive rcv;   /* Home shielding only; the Receive page remains a stub */
+    struct zw_receive rcv;   /* Private addresses already known; Receive does not create one */
     enum zw_profile profile;
     enum zw_cred cred_src;
     uint16_t port;
@@ -276,6 +276,9 @@ void zw_screen_connect_build(struct gui_tree *t, const struct zw_model *m);
 void zw_screen_home_build(struct gui_tree *t, const struct zw_model *m);
 void zw_screen_send_build(struct gui_tree *t, const struct zw_model *m);
 void zw_screen_receive_build(struct gui_tree *t, const struct zw_model *m);
+/* Sapling address already on the model, or NULL when none can be shared. */
+const char *zw_receive_address(const struct zw_model *m);
+void zw_receive_publish(const struct zw_model *m, struct gui_ui *ui);
 void zw_screen_activity_build(struct gui_tree *t, const struct zw_model *m);
 void zw_screen_advanced_build(struct gui_tree *t, const struct zw_model *m);
 void zw_screen_soon(struct gui_tree *t, const char *prefix, const char *title, const char *body);
