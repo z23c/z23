@@ -206,6 +206,18 @@ static bool binary_unchanged(const char *dir, bool existing, const struct snapsh
         lstat(dir, &st) != 0 && errno == ENOENT;
 }
 
+static void binary_consent_report(bool existing, const char *pin, bool ready,
+                                  bool refused, bool unchanged, int rc, const char *output)
+{
+    if (refused && unchanged)
+        printf("binary consent %s %s: rc=%d stderr=%s", existing ? "marked" : "absent",
+               pin ? pin : "(no pin)", rc, output);
+    if (!refused || !unchanged)
+        fprintf(stderr, "binary consent %s %s: refused=%d rc=%d unchanged=%d output=%s\n",
+                existing ? "marked" : "absent", pin ? pin : "(no pin)", refused, rc,
+                unchanged, ready ? output : "(setup failed)");
+}
+
 static int binary_consent_case(bool existing, const char *pin)
 {
     char home[512], parent[600], dir[700], marker[800], sentinel[800], output[4096] = {0};
@@ -221,13 +233,7 @@ static int binary_consent_case(bool existing, const char *pin)
         ready = binary_marked_fixture(dir, marker, sentinel, &before);
     bool refused = ready && binary_refuse(home, parent, pin, &rc, output, sizeof(output));
     bool unchanged = binary_unchanged(dir, existing, &before);
-    if (refused && unchanged)
-        printf("binary consent %s %s: rc=%d stderr=%s", existing ? "marked" : "absent",
-               pin ? pin : "(no pin)", rc, output);
-    if (!refused || !unchanged)
-        fprintf(stderr, "binary consent %s %s: refused=%d rc=%d unchanged=%d output=%s\n",
-                existing ? "marked" : "absent", pin ? pin : "(no pin)", refused, rc,
-                unchanged, ready ? output : "(setup failed)");
+    binary_consent_report(existing, pin, ready, refused, unchanged, rc, output);
     (void)test_rm_rf_recursive(home);
     return refused && unchanged ? 0 : 1;
 }
