@@ -2,6 +2,7 @@
 
 #include "test/test_core.h"
 #include "base/safe_alloc.h"
+#include "primitives/transaction_v6_decode.h"
 #include "bloom/bloom.h"
 #include "chain/chainparams.h"
 #include "validation/check_transaction.h"
@@ -1440,11 +1441,206 @@ static int test_tx_v6_wire_lifecycle(void)
     return ok ? 0 : 1;
 }
 
+static bool tx_v6_write_header(struct byte_stream *wire)
+{
+    static const uint8_t header[20] = {
+        6, 0, 0, 0x80, 0x98, 0xb6, 0x84, 0xd8,
+        0x5b, 0x16, 0xa5, 0x37, 0x44, 0x33, 0x22, 0x11,
+        0x08, 0x07, 0x06, 0x05
+    };
+    return stream_write_bytes(wire, header, sizeof header);
+}
+
+static bool tx_v6_transparent_frame(struct byte_stream *wire, struct tx_in *in,
+                                    struct tx_out *out)
+{
+    tx_in_init(in);
+    for (size_t i = 0; i < sizeof in->prevout.hash.data; ++i)
+        in->prevout.hash.data[i] = (uint8_t)i;
+    in->prevout.n = 0x12345678;
+    in->script_sig.data[0] = 0xaa;
+    in->script_sig.data[1] = 0xbb;
+    in->script_sig.data[2] = 0xcc;
+    in->script_sig.size = 3;
+    in->sequence = 0x89abcdef;
+    tx_out_set_null(out);
+    out->value = 123456789;
+    out->script_pub_key.data[0] = 0x51;
+    out->script_pub_key.data[1] = 0x52;
+    out->script_pub_key.size = 2;
+
+    stream_init(wire, 128);
+    return tx_v6_write_header(wire) &&
+        stream_write_compact_size(wire, 1) && tx_in_serialize(in, wire) &&
+        stream_write_compact_size(wire, 1) && tx_out_serialize(out, wire) &&
+        stream_write_compact_size(wire, 0) &&
+        stream_write_compact_size(wire, 0) &&
+        stream_write_compact_size(wire, 0) &&
+        stream_write_compact_size(wire, 0);
+}
+
+static bool tx_v6_sapling_frame(struct byte_stream *wire)
+{
+    uint8_t spend[96], output[756], anchor[32], proof[192], signature[64];
+    uint8_t output_proof[192], binding[64];
+    memset(spend, 0x11, sizeof spend);
+    memset(output, 0x22, sizeof output);
+    memset(anchor, 0x33, sizeof anchor);
+    memset(proof, 0x44, sizeof proof);
+    memset(signature, 0x55, sizeof signature);
+    memset(output_proof, 0x66, sizeof output_proof);
+    memset(binding, 0x77, sizeof binding);
+    stream_init(wire, 2048);
+    return tx_v6_write_header(wire) &&
+        stream_write_compact_size(wire, 0) &&
+        stream_write_compact_size(wire, 0) &&
+        stream_write_compact_size(wire, 1) &&
+        stream_write_bytes(wire, spend, sizeof spend) &&
+        stream_write_compact_size(wire, 1) &&
+        stream_write_bytes(wire, output, sizeof output) &&
+        stream_write_i64_le(wire, 200000) &&
+        stream_write_bytes(wire, anchor, sizeof anchor) &&
+        stream_write_bytes(wire, proof, sizeof proof) &&
+        stream_write_bytes(wire, signature, sizeof signature) &&
+        stream_write_bytes(wire, output_proof, sizeof output_proof) &&
+        stream_write_bytes(wire, binding, sizeof binding) &&
+        stream_write_compact_size(wire, 0) &&
+        stream_write_compact_size(wire, 0);
+}
+
+static bool tx_v6_decode_oom(const unsigned char *data, size_t size,
+                             const char *label)
+{
+    struct byte_stream input;
+    stream_init_from_data(&input, data, size);
+    struct transaction tx;
+    zcl_alloc_fault_fail_next(label);
+    bool refused = !transaction_v6_decode_prefix(&tx, &input, size);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    bool ok = refused && fired && input.read_pos == 0 && !input.error;
+    transaction_free(&tx);
+    return ok && !tx.vin && !tx.vout && !tx.v_shielded_spend &&
+        !tx.v_shielded_output && !tx.v6_wire.data && !tx.num_vin &&
+        !tx.num_vout && !tx.num_shielded_spend && !tx.num_shielded_output;
+}
+
+static bool tx_v6_transparent_fields_match(const struct transaction *tx,
+                                            const struct tx_in *expected_in,
+                                            const struct tx_out *expected_out)
+{
+    return tx->num_vin == 1 && tx->num_vout == 1 &&
+        tx->vin[0].prevout.n == expected_in->prevout.n &&
+        uint256_eq(&tx->vin[0].prevout.hash, &expected_in->prevout.hash) &&
+        tx->vin[0].script_sig.size == expected_in->script_sig.size &&
+        !memcmp(tx->vin[0].script_sig.data, expected_in->script_sig.data, 3) &&
+        tx->vin[0].sequence == expected_in->sequence &&
+        tx->vout[0].value == expected_out->value &&
+        tx->vout[0].script_pub_key.size == expected_out->script_pub_key.size &&
+        !memcmp(tx->vout[0].script_pub_key.data, expected_out->script_pub_key.data, 2) &&
+        tx->lock_time == 0x11223344 && tx->expiry_height == 0x05060708;
+}
+
+static bool tx_v6_wire_and_hash_match(const struct transaction *tx,
+                                      const struct byte_stream *wire)
+{
+    return tx->v6_wire.data && tx->v6_wire.data != wire->data &&
+        tx->v6_wire.size == wire->size &&
+        !memcmp(tx->v6_wire.data, wire->data, wire->size) &&
+        !uint256_is_null(&tx->hash);
+}
+
+static int test_tx_v6_transparent_model(void)
+{
+    struct byte_stream wire;
+    struct tx_in expected_in;
+    struct tx_out expected_out;
+    bool built = tx_v6_transparent_frame(&wire, &expected_in, &expected_out);
+    struct byte_stream input;
+    stream_init_from_data(&input, wire.data, wire.size);
+    struct transaction tx;
+    transaction_init(&tx);
+    bool ok = built && transaction_v6_decode_prefix(&tx, &input, wire.size) &&
+        input.read_pos == wire.size &&
+        tx_v6_transparent_fields_match(&tx, &expected_in, &expected_out) &&
+        tx_v6_wire_and_hash_match(&tx, &wire);
+    struct byte_stream refused;
+    stream_init(&refused, 64);
+    ok = ok && !transaction_serialize(&tx, &refused) && refused.size == 0;
+    stream_free(&refused);
+    transaction_free(&tx);
+    stream_free(&wire);
+    printf("transaction v6 transparent model and serialization refusal... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static bool tx_v6_transparent_oom(const struct byte_stream *wire)
+{
+    static const char *const labels[] = {
+        "tx_v6_wire", "tx_vin", "tx_vout"
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof labels / sizeof labels[0]; ++i)
+        ok = tx_v6_decode_oom(wire->data, wire->size, labels[i]) && ok;
+    return ok;
+}
+
+static bool tx_v6_sapling_oom(const struct byte_stream *wire)
+{
+    static const char *const labels[] = {
+        "tx_shielded_spend", "tx_shielded_output"
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof labels / sizeof labels[0]; ++i)
+        ok = tx_v6_decode_oom(wire->data, wire->size, labels[i]) && ok;
+    return ok;
+}
+
+static bool tx_v6_sapling_model_matches(const struct transaction *tx,
+                                        const struct byte_stream *input, size_t size)
+{
+    return input->read_pos == size && tx->num_shielded_spend == 1 &&
+        tx->num_shielded_output == 1 && tx->value_balance == 200000 &&
+        tx->v_shielded_spend[0].cv.data[0] == 0x11 &&
+        tx->v_shielded_spend[0].anchor.data[0] == 0x33 &&
+        tx->v_shielded_spend[0].zkproof[0] == 0x44 &&
+        tx->v_shielded_spend[0].spend_auth_sig[0] == 0x55 &&
+        tx->v_shielded_output[0].cv.data[0] == 0x22 &&
+        tx->v_shielded_output[0].zkproof[0] == 0x66 &&
+        tx->binding_sig[0] == 0x77;
+}
+
+static int test_tx_v6_model_allocation_failures(void)
+{
+    struct byte_stream transparent, sapling;
+    struct tx_in in;
+    struct tx_out out;
+    bool ok = tx_v6_transparent_frame(&transparent, &in, &out) &&
+        tx_v6_sapling_frame(&sapling);
+    ok = tx_v6_transparent_oom(&transparent) && ok;
+    ok = tx_v6_sapling_oom(&sapling) && ok;
+
+    struct byte_stream input;
+    stream_init_from_data(&input, sapling.data, sapling.size);
+    struct transaction tx;
+    ok = transaction_v6_decode_prefix(&tx, &input, sapling.size) &&
+        tx_v6_sapling_model_matches(&tx, &input, sapling.size) && ok;
+    transaction_free(&tx);
+    stream_free(&transparent);
+    stream_free(&sapling);
+    printf("transaction v6 Sapling model and allocation-failure cleanup... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 int test_transaction(void)
 {
     int failures = 0;
 
     failures += test_tx_v6_wire_lifecycle();
+    failures += test_tx_v6_transparent_model();
+    failures += test_tx_v6_model_allocation_failures();
     failures += test_tx_outpoint_alloc_and_value();
     failures += test_tx_coinbase_bloom_and_merkle_roots();
     failures += test_tx_partial_merkle_build_extract();

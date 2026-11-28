@@ -1346,3 +1346,7 @@ later lane flips it HARD.
 - 2026-11-28T05:32:29Z — REASON: testnet-only Ironwood v6 txid and authorizing-data digest integration
   old ROOT: 5773dc51904b5bb152119e8506210a724ade2475747255c27b6b17f4b92fa763
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-28T06:26:29Z — REASON: testnet-only Ironwood v6 transparent and Sapling model decoding
+  old ROOT: ead40409ab31eb1a39c4a43ecd7e5ea1daf537ffca7698b88030610cb376666d
+  by: owner unseal ritual (make core-unseal)

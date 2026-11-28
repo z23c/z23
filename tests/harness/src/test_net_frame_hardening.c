@@ -33,6 +33,7 @@
 #include "test/test_core.h"
 
 #include "base/hex.h"
+#include "base/serialize_le.h"
 #include "core/serialize.h"
 #include "crypto/sha256.h"
 #include "bloom/merkle.h"
@@ -623,6 +624,27 @@ static int neth_v6_candidate_header_identity(const struct block *b)
     return failures;
 }
 
+static int neth_v6_candidate_sapling_identity(const struct transaction *v6,
+                                               const unsigned char *data)
+{
+    int failures = 0;
+    const unsigned char *wire = data + 260;
+    const struct spend_description *spend = v6->v_shielded_spend;
+    NETH_CHECK("block v6: funded Sapling model matches independent offsets",
+               v6->num_shielded_spend == 1 && spend &&
+               v6->num_shielded_output == 0 && !v6->v_shielded_output &&
+               v6->value_balance == 200000 && zcl_read_i64_le(wire + 120) == 200000 &&
+               !memcmp(spend->cv.data, wire + 23, sizeof spend->cv.data) &&
+               !memcmp(spend->nullifier.data, wire + 55, sizeof spend->nullifier.data) &&
+               !memcmp(spend->rk.data, wire + 87, sizeof spend->rk.data) &&
+               !memcmp(spend->anchor.data, wire + 128, sizeof spend->anchor.data) &&
+               !memcmp(spend->zkproof, wire + 160, sizeof spend->zkproof) &&
+               !memcmp(spend->spend_auth_sig, wire + 352,
+                       sizeof spend->spend_auth_sig) &&
+               !memcmp(v6->binding_sig, wire + 416, sizeof v6->binding_sig));
+    return failures;
+}
+
 static int neth_v6_candidate_transaction_identity(const struct block *b,
                                                   const unsigned char *data)
 {
@@ -644,6 +666,7 @@ static int neth_v6_candidate_transaction_identity(const struct block *b,
                neth_sha256_is(b->vtx[1].v6_wire.data, b->vtx[1].v6_wire.size,
                    "684900bd4595fa07474506a5b6d04b524ff2954877b259a6de6c7da5f4ee2111") &&
                uint256_eq(&b->vtx[1].hash, &v6_txid));
+    failures += neth_v6_candidate_sapling_identity(&b->vtx[1], data);
     stream_free(&coinbase);
     return failures;
 }
