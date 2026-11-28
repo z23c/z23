@@ -13,6 +13,9 @@
 #include "platform/time_compat.h"
 #include "controllers/agent_security_posture.h"
 #include "core/uint256.h"
+#include "core/serialize.h"
+#include "primitives/transaction_v6_decode.h"
+#include "jobs/utxo_apply_turnstile.h"
 #include "json/json.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
@@ -262,6 +265,36 @@ static bool synth_chain_uv_build(struct synth_chain_uv *sc, int n)
     sc->n = n;
     return true;
 }
+
+/* Research-stage cases must start at the descriptor genesis and use real
+ * txids, because the session replays and authenticates every parent body. */
+static bool uv_research_genesis(struct synth_chain_uv *sc)
+{
+    const struct chain_research_descriptor *d = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    if (!d || !d->chain || !d->genesis_wire || sc->n < 1) return false;
+    struct byte_stream s;
+    stream_init_from_data(&s, d->genesis_wire, d->genesis_wire_len);
+    block_free(&sc->bodies[0]);
+    if (!block_deserialize(&sc->bodies[0], &s) || stream_remaining(&s)) return false;
+    block_get_hash(&sc->bodies[0], &sc->hashes[0]);
+    if (!uint256_eq(&sc->hashes[0], &d->chain->consensus.hashGenesisBlock)) return false;
+    for (int h=0; h<sc->n; ++h) {
+        struct block *b = &sc->bodies[h];
+        if (h) {
+            for (size_t i=0; i<b->num_vtx; ++i) transaction_compute_hash(&b->vtx[i]);
+            struct uint256 ids[2] = {b->vtx[0].hash, b->vtx[1].hash};
+            b->header.hashMerkleRoot = compute_merkle_root(ids, 2);
+            b->header.hashPrevBlock = sc->hashes[h-1];
+            block_get_hash(b, &sc->hashes[h]);
+        }
+        sc->blocks[h].nVersion = b->header.nVersion;
+        sc->blocks[h].nTime = b->header.nTime;
+        sc->blocks[h].nBits = b->header.nBits;
+        tbi_ext(&sc->blocks[h])->hashMerkleRoot = b->header.hashMerkleRoot;
+    }
+    return true;
+}
+
 
 static void synth_chain_uv_free(struct synth_chain_uv *sc)
 {
@@ -545,6 +578,11 @@ static int uv_setup(const char *tag, int n, enum uv_fail_kind fail_kind,
     sc->upstream_fail_height = upstream_fail_height;
     main_state_init(ms);
     if (!synth_chain_uv_build(sc, n)) return 2;
+    const struct chain_research_descriptor *profile = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    if (profile && chain_research_profile_current() == profile) {
+        if (!uv_research_genesis(sc) || !exec_sql(progress_store_db(),
+            "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) VALUES('utxo_apply',0,0)")) return 2;
+    }
     active_chain_move_window_tip(&ms->chain_active, &sc->blocks[n - 1]);
 
     if (!seed_proof_validate(progress_store_db(), sc, n,
@@ -2761,43 +2799,56 @@ static bool uv_pool_absent(sqlite3 *db, int64_t height)
         !found;
 }
 
+static bool uv_read_v6(struct transaction *tx, const char *path, size_t size)
+{
+    uint8_t *wire = zcl_malloc(size, "stage v6 fixture");
+    if (!wire) return false;
+    FILE *f = fopen(path, "rb");
+    bool ok = f && fread(wire, 1, size, f) == size && fgetc(f) == EOF && !ferror(f);
+    if (f && fclose(f)) ok = false;
+    if (ok) {
+        struct byte_stream s;
+        stream_init_from_data(&s, wire, size);
+        ok = transaction_v6_decode_prefix(tx, &s, size) && !stream_remaining(&s);
+    }
+    free(wire);
+    return ok;
+}
+
+/* The stage intentionally holds v6 until hash-bound authorization exists. */
+static bool uv_install_reward(struct synth_chain_uv *sc, sqlite3 *db, int h)
+{
+    struct block *b = &sc->bodies[h];
+    transaction_free(&b->vtx[1]);
+    transaction_init(&b->vtx[1]);
+    if (!uv_read_v6(&b->vtx[1], "tests/fixtures/ironwood/postnu63-h1-reward-spend.v6", 9313)) return false;
+    struct uint256 ids[2] = {b->vtx[0].hash, b->vtx[1].hash};
+    b->header.hashMerkleRoot = compute_merkle_root(ids, 2);
+    block_get_hash(b, &sc->hashes[h]);
+    tbi_ext(&sc->blocks[h])->hashMerkleRoot = b->header.hashMerkleRoot;
+    return set_proof_validate_hash(db, h, &sc->hashes[h]) &&
+        seed_script_validate_row(db, h, 1, &sc->hashes[h]);
+}
+
 static int uv_ironwood_pool_rewind_cases(void)
 {
     int failures = 0;
-    UV_CHECK("ironwood pool: select research chain",
-             chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    UV_CHECK("ironwood pool: select research chain", chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
     char dir[256]; struct main_state ms; struct synth_chain_uv sc;
-    UV_CHECK("ironwood pool: setup",
-             uv_setup("iw_pool_rewind", 3, UV_FAIL_NONE, -1, dir, sizeof(dir),
-                      &ms, &sc) == 0);
-    sc.bodies[0].vtx[0].ironwood_value_balance = -100;
-    sc.bodies[1].vtx[0].ironwood_value_balance = -50;
-    sc.bodies[2].vtx[0].ironwood_value_balance = 25;
-    UV_CHECK("ironwood pool: apply three blocks",
-             utxo_apply_stage_drain(100) == 3);
+    UV_CHECK("ironwood pool: setup with pinned genesis", uv_setup("iw_pool_rewind", 3, UV_FAIL_NONE, -1, dir, sizeof(dir), &ms, &sc) == 0);
     sqlite3 *db = progress_store_db();
-    UV_CHECK("ironwood pool: durable totals at every height",
-             uv_pool_total(db, 0, 100) && uv_pool_total(db, 1, 150) &&
-             uv_pool_total(db, 2, 125));
+    UV_CHECK("ironwood pool: apply three zero-delta blocks", utxo_apply_stage_drain(100) == 3);
+    UV_CHECK("ironwood pool: durable zero totals", uv_pool_total(db,0,0) && uv_pool_total(db,1,0) && uv_pool_total(db,2,0));
     utxo_apply_stage_shutdown();
-    UV_CHECK("ironwood pool: restart preserves exact total",
-             utxo_apply_stage_init(&ms) && uv_pool_total(db, 2, 125));
+    UV_CHECK("ironwood pool: restart preserves total", utxo_apply_stage_init(&ms) && uv_pool_total(db,2,0));
     utxo_apply_stage_set_reader(fake_reader, &sc);
-    bool rewound =
-        exec_sql(db, "BEGIN IMMEDIATE") &&
-        utxo_apply_emit_inverse_delta(db, 2) &&
-        utxo_apply_emit_inverse_delta(db, 1) &&
-        utxo_apply_delete_rows_above(db, 1, 2) &&
-        utxo_apply_unwind_write_cursor(db, 1) &&
-        coins_kv_set_applied_height_in_tx(db, 1) &&
-        exec_sql(db, "COMMIT");
-    UV_CHECK("ironwood pool: rewind transaction commits", rewound);
-    UV_CHECK("ironwood pool: abandoned total removed and fork total retained",
-             uv_pool_absent(db, 2) && uv_pool_total(db, 0, 100));
-    UV_CHECK("ironwood pool: reconnect restores exact totals",
-             utxo_apply_stage_drain(100) == 2 &&
-             uv_pool_total(db, 1, 150) && uv_pool_total(db, 2, 125));
-    uv_teardown(dir, &ms, &sc);
+    bool rewound = exec_sql(db,"BEGIN IMMEDIATE") && utxo_apply_emit_inverse_delta(db,2) &&
+        utxo_apply_emit_inverse_delta(db,1) && utxo_apply_delete_rows_above(db,1,2) &&
+        utxo_apply_unwind_write_cursor(db,1) && coins_kv_set_applied_height_in_tx(db,1) && exec_sql(db,"COMMIT");
+    UV_CHECK("ironwood pool: rewind commits", rewound);
+    UV_CHECK("ironwood pool: abandoned rows removed", uv_pool_absent(db,2) && uv_pool_total(db,0,0));
+    UV_CHECK("ironwood pool: reconnect restores totals", utxo_apply_stage_drain(100) == 2 && uv_pool_total(db,1,0) && uv_pool_total(db,2,0));
+    uv_teardown(dir,&ms,&sc);
     chain_params_select(CHAIN_REGTEST);
     return failures;
 }
@@ -2805,27 +2856,82 @@ static int uv_ironwood_pool_rewind_cases(void)
 static int uv_ironwood_reject_status_cases(void)
 {
     int failures = 0;
-    UV_CHECK("ironwood reject status: select research chain",
-             chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    UV_CHECK("ironwood hold: select research chain", chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
     char dir[256]; struct main_state ms; struct synth_chain_uv sc;
-    UV_CHECK("ironwood reject status: setup",
-             uv_setup("iw_reject_status", 2, UV_FAIL_NONE, -1, dir, sizeof(dir),
-                      &ms, &sc) == 0);
-    sc.bodies[0].vtx[0].ironwood_value_balance = 1;
-    atomic_store(&g_enforce_turnstile, true);
-    UV_CHECK("ironwood reject status: negative pool refused",
-             utxo_apply_stage_drain(100) == 0 &&
-             utxo_apply_stage_cursor() == 0);
-    UV_CHECK("ironwood reject status: classified counter, not internal_error",
-             uv_dump_has("\"turnstile_ironwood_reject_total\":1") &&
-             uv_dump_has("\"internal_error_total\":0"));
-    UV_CHECK("ironwood reject status: refused height has no committed row",
-             !utxo_apply_stage_succeeded_at(0));
-    atomic_store(&g_enforce_turnstile, false);
-    uv_teardown(dir, &ms, &sc);
+    UV_CHECK("ironwood hold: setup with pinned genesis", uv_setup("iw_auth_hold", 3, UV_FAIL_NONE, -1, dir, sizeof(dir), &ms, &sc) == 0);
+    sqlite3 *db = progress_store_db();
+    UV_CHECK("ironwood hold: apply genesis and parent", utxo_apply_stage_drain(2) == 2 && uv_pool_total(db,1,0));
+    UV_CHECK("ironwood hold: install genuine v6 reward", uv_install_reward(&sc, db, 2));
+    UV_CHECK("ironwood hold: real v6 waits for authorization", utxo_apply_stage_drain(10) == 0 && utxo_apply_stage_cursor() == 2 && blocker_exists("utxo_apply.ironwood"));
+    UV_CHECK("ironwood hold: no v6 pool row committed", uv_pool_absent(db,2));
+    uv_teardown(dir,&ms,&sc);
     chain_params_select(CHAIN_REGTEST);
     return failures;
 }
+
+/* A known negative total can have been retained while enforcement was in
+ * shadow mode. The next ordinary block must be classified under enforcement. */
+static int uv_ironwood_negative_parent_cases(void)
+{
+    int failures = 0;
+    UV_CHECK("ironwood negative parent: select research chain", chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    char dir[256]; struct main_state ms; struct synth_chain_uv sc;
+    UV_CHECK("ironwood negative parent: setup with pinned genesis", uv_setup("iw_negative_parent", 3, UV_FAIL_NONE, -1, dir, sizeof(dir), &ms, &sc) == 0);
+    sqlite3 *db = progress_store_db();
+    UV_CHECK("ironwood negative parent: apply genesis and parent", utxo_apply_stage_drain(2) == 2 && uv_pool_total(db,1,0));
+    UV_CHECK("ironwood negative parent: fixture records prior shadow total", exec_sql(db,"UPDATE shielded_pool_totals SET ironwood=-1 WHERE height=1") && uv_pool_total(db,1,-1));
+    atomic_store(&g_enforce_turnstile,true);
+    UV_CHECK("ironwood negative parent: ordinary next block is refused", utxo_apply_stage_drain(10) == 0 && utxo_apply_stage_cursor() == 2);
+    UV_CHECK("ironwood negative parent: rejection counter is classified", uv_dump_has("\"turnstile_ironwood_reject_total\":1") && uv_dump_has("\"internal_error_total\":0"));
+    UV_CHECK("ironwood negative parent: no rejected row committed", uv_pool_absent(db,2));
+    atomic_store(&g_enforce_turnstile,false);
+    uv_teardown(dir,&ms,&sc);
+    chain_params_select(CHAIN_REGTEST);
+    return failures;
+}
+
+/* Exercise real decoded v6 values through the enforcing component directly:
+ * full stage admission remains held until v6 authorization is wired. */
+static bool uv_turnstile_v6_step(sqlite3 *db, const char *path, size_t size,
+                                  int height, int64_t expected, bool accept)
+{
+    struct transaction tx;
+    transaction_init(&tx);
+    if (!uv_read_v6(&tx,path,size)) { transaction_free(&tx); return false; }
+    struct block b = {.vtx=&tx,.num_vtx=1};
+    struct delta_summary summary = {.ok=true,.status="ok"};
+    struct utxo_apply_turnstile_pending pending = {0};
+    bool ok = utxo_apply_turnstile_stage_check(db,&b,height,NULL,&summary,&pending);
+    if (accept) ok = ok && summary.ok && pending.ironwood_known && pending.ironwood == expected &&
+        shielded_pool_kv_put(db,height,pending.sprout,pending.sapling) &&
+        shielded_pool_kv_put_ironwood(db,height,pending.ironwood);
+    else ok = ok && !summary.ok && !pending.write &&
+        !strcmp(summary.failure_kind,"bad-txns-ironwood-turnstile-violation");
+    transaction_free(&tx);
+    return ok;
+}
+
+static int uv_ironwood_v6_turnstile_cases(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    UV_CHECK("v6 pool: select research chain", chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    UV_CHECK("v6 pool: open fixture", sqlite3_open(":memory:",&db) == SQLITE_OK && shielded_pool_kv_ensure_schema(db));
+    UV_CHECK("v6 pool: seed known zero", shielded_pool_kv_put(db,0,0,0) && shielded_pool_kv_put_ironwood(db,0,0));
+    atomic_store(&g_enforce_turnstile,true);
+    const char *reward="tests/fixtures/ironwood/postnu63-h1-reward-spend.v6";
+    const char *withdraw="tests/fixtures/ironwood/postnu63-h1-reward-withdrawal.v6";
+    UV_CHECK("v6 pool: reward deposits actual amount", uv_turnstile_v6_step(db,reward,9313,1,1249985000,true));
+    UV_CHECK("v6 pool: withdrawal returns to zero", uv_turnstile_v6_step(db,withdraw,9200,2,0,true));
+    UV_CHECK("v6 pool: rewind removes withdrawal", shielded_pool_kv_delete_range(db,2,2) && uv_pool_total(db,1,1249985000) && uv_pool_absent(db,2));
+    UV_CHECK("v6 pool: reconnect repeats withdrawal", uv_turnstile_v6_step(db,withdraw,9200,2,0,true));
+    UV_CHECK("v6 pool: withdrawal beyond zero refused", uv_turnstile_v6_step(db,withdraw,9200,3,0,false) && uv_pool_absent(db,3));
+    atomic_store(&g_enforce_turnstile,false);
+    if (db) sqlite3_close(db);
+    chain_params_select(CHAIN_REGTEST);
+    return failures;
+}
+
 
 static int uv_suffix_reconcile_cases(void)
 {
@@ -4177,6 +4283,8 @@ int test_utxo_apply_stage(void)
     failures += uv_nf_ironwood_rewind_cases();
     failures += uv_ironwood_pool_rewind_cases();
     failures += uv_ironwood_reject_status_cases();
+    failures += uv_ironwood_negative_parent_cases();
+    failures += uv_ironwood_v6_turnstile_cases();
 
     /* A past cursor-only repair could leave shielded kernel rows at future
      * heights. Restart must remove that suffix before the next block fold,
