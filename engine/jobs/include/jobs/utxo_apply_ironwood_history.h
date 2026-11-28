@@ -20,7 +20,7 @@ typedef bool (*ironwood_history_reader_fn)(struct block *, const struct block_in
  * one ancestry link or authenticates one body. The cursor and event outputs
  * change only on success and can be discarded for rollback. Scan slots are
  * scratch and may be rewritten by retrying the same step. */
-struct ironwood_history_cursor {
+struct ironwood_history_cursor { // hardening-ok: resumable state, not a byte reader
     const struct block_index *parent, *scan;
     const struct block_index **slots;
     size_t slot_count;
