@@ -758,12 +758,12 @@ static int mirror_rebuild_persist(struct node_db *ndb, struct mirror_stage *st,
     return 0;
 }
 
-/* Copy every live coins_kv row into the mirror under ONE transaction on a
- * PRIVATE node.db writer. Returns the number of rows written, or a negative
- * UTXO_MIRROR_REBUILD_* code. Ordinary failures roll back; UNSETTLED means a
- * rollback or the writer's checked close could not prove completion and
- * neither restoration nor a healthy mirror is claimed. `shared` is only the
- * path source; it never carries the rebuild's transaction. */
+/* Copy coins to the mirror in one PRIVATE node.db transaction. Before COMMIT,
+ * staged rows are not committed; failed rollback leaves restoration unproved.
+ * After a verified COMMIT a failed checked close is UNSETTLED: the commit is
+ * durable, rows may change, completion is unproved, and health is quarantined.
+ * An existing quarantine cause remains. `shared` supplies only the path; it never
+ * carries the rebuild's transaction. */
 static int64_t mirror_rebuild_from_coins_kv(struct node_db *shared,
                                             int32_t *frontier_out,
                                             const _Atomic bool *stop,

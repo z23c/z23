@@ -13,10 +13,32 @@ typedef int zcl_test_utxo_mirror_rewind_translation_unit;
 #endif
 
 #if defined(ZCL_TEST_UTXO_MIRROR_REWIND_INCLUDED) && defined(ZCL_TESTING)
-static void umr_loop(struct utxo_mirror_sync_service *svc)
+static void umr_jobs(struct utxo_mirror_sync_service *svc)
 {
     (void)utxo_mirror_rebuild_job_service(svc);
+}
+
+static void umr_loop(struct utxo_mirror_sync_service *svc)
+{
+    umr_jobs(svc);
     (void)utxo_mirror_sync_run_once(svc);
+}
+
+struct umr_clock {
+    _Atomic int64_t monotonic_ms;
+    int64_t wall_ms;
+};
+
+static int64_t umr_clock_monotonic(void *ctx)
+{
+    struct umr_clock *clock = ctx;
+    return atomic_load(&clock->monotonic_ms) * INT64_C(1000000);
+}
+
+static int64_t umr_clock_wall(void *ctx)
+{
+    struct umr_clock *clock = ctx;
+    return clock->wall_ms;
 }
 
 static bool umr_job_is(struct utxo_mirror_sync_service *svc, uint64_t id, int state)
@@ -67,10 +89,12 @@ static int umr_test_height(void)
     UMS_CHECK("T1 fixture and rewind", umr_start(&fx, "rewind_t1") && umr_lower(&fx));
     char before[4096], after[4096];
     UMS_CHECK("T1 original projection", ums_digest(fx.ndb.db, before, sizeof(before)));
+    int64_t rebuilds_before = atomic_load(&fx.svc.rebuilds_run);
     umr_loop(&fx.svc);
     UMS_CHECK("T1 first iteration quarantines and queues",
               ums_quarantined_with_cause(&fx.svc, "authority_rewind") &&
               umr_job_is(&fx.svc, 1, UTXO_MIRROR_JOB_PENDING) &&
+              atomic_load(&fx.svc.rebuilds_run) == rebuilds_before &&
               ums_digest(fx.ndb.db, after, sizeof(after)) && !strcmp(before, after));
     umr_loop(&fx.svc);
     UMS_CHECK("T1 second iteration verified height recovery",
@@ -94,10 +118,12 @@ static int umr_test_branch(void)
               coins_kv_spend(fx.pdb, old, 0) &&
               ums_add_coin(fx.pdb, 0x53, 3000, 101) &&
               ums_write_branch_delta_row(fx.pdb, 101, 0x53));
+    int64_t rebuilds_before = atomic_load(&fx.svc.rebuilds_run);
     umr_loop(&fx.svc);
     UMS_CHECK("T2 first iteration quarantines and queues",
               ums_quarantined_with_cause(&fx.svc, "authority_rewind") &&
               umr_job_is(&fx.svc, 1, UTXO_MIRROR_JOB_PENDING) &&
+              atomic_load(&fx.svc.rebuilds_run) == rebuilds_before &&
               db_utxo_exists(&fx.ndb, old, 0) && umr_height(&fx.ndb, 102));
     umr_loop(&fx.svc);
     UMS_CHECK("T2 second iteration verified branch recovery",
@@ -129,10 +155,28 @@ static int umr_test_window(void)
               ums_quarantined_with_cause(&fx.svc, "authority_rewind") &&
               umr_job_is(&fx.svc, 1, UTXO_MIRROR_JOB_DONE) &&
               ums_digest(fx.ndb.db, after, sizeof(after)) && !strcmp(before, after));
-    umr_expire_window(&fx.svc);
+    int64_t rebuilds_before = atomic_load(&fx.svc.rebuilds_run);
+    struct umr_clock clock = {.monotonic_ms = INT64_C(1000000), .wall_ms = clock_now_wall_ms()};
+    clock_iface_t fake = {.now_monotonic_ns = umr_clock_monotonic,
+                          .now_wall_ms = umr_clock_wall, .self = &clock};
+    const clock_iface_t *previous = clock_default();
+    clock_set_default(&fake);
+    atomic_store(&fx.svc.auto_rewind_last_ms, INT64_C(1000000) - INT64_C(30000));
+    umr_loop(&fx.svc);
+    UMS_CHECK("T3 at 30000ms no enqueue or completed rebuild",
+              umr_job_is(&fx.svc, 1, UTXO_MIRROR_JOB_DONE) &&
+              atomic_load(&fx.svc.rebuilds_run) == rebuilds_before);
+    atomic_store(&fx.svc.auto_rewind_last_ms, INT64_C(1000000) - INT64_C(59999));
+    umr_loop(&fx.svc);
+    UMS_CHECK("T3 at 59999ms no enqueue or completed rebuild",
+              umr_job_is(&fx.svc, 1, UTXO_MIRROR_JOB_DONE) &&
+              atomic_load(&fx.svc.rebuilds_run) == rebuilds_before);
+    atomic_store(&fx.svc.auto_rewind_last_ms, INT64_C(1000000) - INT64_C(60000));
     umr_loop(&fx.svc);
     UMS_CHECK("T3 expired window queues second job",
-              umr_job_is(&fx.svc, 2, UTXO_MIRROR_JOB_PENDING));
+              umr_job_is(&fx.svc, 2, UTXO_MIRROR_JOB_PENDING) &&
+              atomic_load(&fx.svc.rebuilds_run) == rebuilds_before);
+    clock_set_default(previous);
     umr_loop(&fx.svc);
     UMS_CHECK("T3 expired window verified recovery", umr_healthy(&fx, 100));
     ums_fx_close(&fx);
@@ -149,7 +193,10 @@ static int umr_test_refusal(void)
     UMS_CHECK("T4 capture old projection",
               ums_digest(fx.ndb.db, before, sizeof(before)) &&
               progress_meta_delete(fx.pdb, COINS_KV_MIGRATION_COMPLETE_KEY));
-    umr_loop(&fx.svc);
+    umr_jobs(&fx.svc);
+    UMS_CHECK("T4 refused job stays quarantined before next pass",
+              ums_quarantined_with_cause(&fx.svc, "authority_rewind"));
+    (void)utxo_mirror_sync_run_once(&fx.svc);
     struct utxo_mirror_rebuild_job job;
     utxo_mirror_rebuild_job_snapshot(&fx.svc, &job);
     UMS_CHECK("T4 authority refusal preserves quarantine and bytes",

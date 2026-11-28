@@ -19,6 +19,7 @@ struct zcl_result utxo_mirror_rewind_request_if_due(
     int64_t last = atomic_load(&svc->auto_rewind_last_ms);
     for (;;) {
         if (last && (now < last || now - last < MIRROR_REWIND_WINDOW_MS)) {
+            /* Assumes one service instance: utxo_mirror_sync_thread is the only production caller. */
             static struct log_throttle throttle = LOG_THROTTLE_INIT;
             uint64_t reps = 0;
             if (log_throttle_should_emit(&throttle, 1, now / 1000, 60, &reps))

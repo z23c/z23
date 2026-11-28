@@ -2431,7 +2431,7 @@ static int ums_test_branch_replacement(void)
                                     &cursor) && cursor == 103 &&
               ums_branch_hash_is(&fx.ndb, 0x52) &&
               atomic_load(&fx.svc.rebuilds_run) == rebuilds_before);
-    UMS_CHECK("branch: next pass is a bounded quarantined no-op",
+    UMS_CHECK("branch: unsupervised next pass returns 0 and stays quarantined",
               utxo_mirror_sync_run_once(&fx.svc) == 0 &&
               ums_quarantined_with_cause(&fx.svc, "authority_rewind"));
     ums_fx_close(&fx);
@@ -2563,9 +2563,9 @@ static int ums_test_authority_rewind(struct node_db *ndb, sqlite3 *pdb, struct u
         node_db_state_get_int(ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, &cur);
         UMS_CHECK("rewind: cursor is never silently decremented", cur == 212);
     }
-    UMS_CHECK("rewind: no automatic wholesale rebuild",
+    UMS_CHECK("rewind: unsupervised pass completed no wholesale rebuild",
               atomic_load(&svc->rebuilds_run) == rewind_rebuilds);
-    UMS_CHECK("rewind: repeated tick is a bounded no-op",
+    UMS_CHECK("rewind: repeated unsupervised pass returns 0",
               utxo_mirror_sync_run_once(svc) == 0);
     UMS_CHECK("rewind: authority frontier can rebound",
               ums_set_frontier(pdb, 212));
