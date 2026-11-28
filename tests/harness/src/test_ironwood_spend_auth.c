@@ -95,15 +95,11 @@ static bool check_binding(void)
  * Upstream ZIP 244 S.2 uses the txid transparent digest when vin is empty,
  * so ZIP 229 txid bytes are this shielded signature hash. This equivalence
  * does not hold for ordinary transparent inputs, which require prevouts. */
-static bool check_binding_transaction(void)
+static bool check_binding_wire(const uint8_t *wire, size_t size)
 {
-    uint8_t wire[11518], cv[2][32], expected[32];
-    FILE *f = fopen("tests/fixtures/ironwood/postnu63-two-action-payment.bin", "rb");
-    if (!f) return false;
-    bool ok = fread(wire, 1, sizeof wire, f) == sizeof wire && fgetc(f) == EOF && !ferror(f);
-    if (fclose(f) != 0 || !ok) return false;
+    uint8_t cv[2][32], expected[32];
     struct v6_wire_view v; struct v6_digests d; struct v6_action_view a;
-    if (v6_wire_parse(wire, sizeof wire, &v) != V6_WIRE_OK || v.inputs != 0 ||
+    if (v6_wire_parse(wire, size, &v) != V6_WIRE_OK || v.inputs != 0 ||
         v.ironwood.count != 2 || v.ironwood.value_balance.size != 8 ||
         v.ironwood.binding_signature.size != 64 || !v6_wire_digests(&v, &d) ||
         !zcl_hex_decode("19a61a86bd739ad0ffc008dcc239d68bfe79a6b5d2f2488de17d08059fdc905a", expected, 32) ||
@@ -115,6 +111,16 @@ static bool check_binding_transaction(void)
     int64_t balance = zcl_read_i64_le(v.ironwood.value_balance.data);
     return balance == -200000 &&
         ironwood_binding_auth_verify(cv, 2, balance, v.ironwood.binding_signature.data, d.txid).ok;
+}
+
+static bool check_binding_transaction(void)
+{
+    uint8_t wire[11518];
+    FILE *f = fopen("tests/fixtures/ironwood/postnu63-two-action-payment.bin", "rb");
+    if (!f) return false;
+    bool ok = fread(wire, 1, sizeof wire, f) == sizeof wire && fgetc(f) == EOF && !ferror(f);
+    if (fclose(f) != 0 || !ok) return false;
+    return check_binding_wire(wire, sizeof wire);
 }
 
 int test_ironwood_spend_auth(void)
