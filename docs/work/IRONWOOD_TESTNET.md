@@ -62,6 +62,10 @@ The ballot window is inclusive at heights 121–140, with at least 19 of 20 vote
 
 Qualification remains open. Before release, verify the 200,000/200,001-byte boundary with mined blocks, spend a mature protected mining reward, confirm withdrawals during the freeze, and replay a fork that changes the decisive vote. Verify a clean sync from genesis through height 28 via normal startup, where the old history diverged. Use a separately authenticated release catalog for the selected heights. The example catalog below is not the release pin.
 
+The selected [ballot manifest](../../tests/fixtures/ironwood/selected-manifest.json) is 224 bytes including its final newline. Its fork ID is SHA3-256 of the ASCII string `Z23/Ironwood/private-testnet/2026-11-29/release-1`, without a NUL terminator: `def636460fec42410bf914fcc19541b050787dacd3638d2920ad49d64742ed35`. With the fixed genesis above, the independently expected v1 catalog digest is `bb447e1ae3827c976f4ff08a5b5ac7379fa486ce1bc13480f3e9db7e0dc733af`. The manifest file SHA3-256 is `2ab8c84b459c331e946a5848f9a84ed9df5e6c908388d170669c683c47c2b8b5`; it is a file checksum, not the catalog digest.
+
+This manifest describes the two ballot slots and their schedule only. It does not bind the pool verifier, proof of work or peer identity. The selected digest still needs authentication as a release pin and does not establish rule enforcement or startup qualification.
+
 ## Example ballot round (not the release schedule)
 
 The [signaling catalog](MINER_SIGNALING.md) uses the raw genesis hash and a separate fork ID. For this example use SHA3-256 of ASCII `Z23/Ironwood/testnet/experimental-round/v1` without a terminator. The fork ID is `0470426015683b2d25ae8014a684975fa4841720b848c22457ee8f510a1ab718`. Hash the exact proposal file bytes at revision `223f48c5fb361f2a0024909fc75cb557bd1c7e37` with SHA3-256 for the two rule revisions below.
