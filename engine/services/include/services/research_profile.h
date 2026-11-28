@@ -46,13 +46,13 @@ struct research_profile_child {
 struct zcl_result research_profile_bind(const struct research_profile_spec *spec,
                                         struct research_profile_identity *out);
 
-/* Search a bounded nonce space until the child extends this identity. */
+/* Profile fixture: search for a SHA256d nonce in a synthetic 72-byte record.
+ * Network blocks use the normal Equihash validation path. */
 struct zcl_result research_profile_solve_child(const struct research_profile_identity *id,
                                                uint32_t compact_target,
                                                struct research_profile_child *out);
 
-/* Verify proof of work first. A valid proof whose previous hash or profile
- * commitment belongs to another profile is still refused. */
+/* Check the fixture target, previous hash, and profile commitment. */
 struct zcl_result research_profile_accept_child(const struct research_profile_identity *parent,
                                                 const struct research_profile_child *child,
                                                 int *pow_ok);
