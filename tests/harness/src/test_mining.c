@@ -440,6 +440,28 @@ static int mining_rate_cases(void)
 }
 
 
+static bool mining_h1_wire_check(struct block_template *tmpl, uint32_t header, uint32_t group)
+{
+    struct transaction *cb = &tmpl->block.vtx[0];
+    struct byte_stream wire; stream_init(&wire, 256);
+    struct uint256 fresh;
+    struct transaction decoded; transaction_init(&decoded);
+    bool ok = transaction_serialize(cb, &wire) && !wire.error && wire.size >= 8;
+    if (ok) {
+        ok = ReadLE32(wire.data) == header;
+        if (group) ok = ok && ReadLE32(wire.data + 4) == group;
+    }
+    if (ok) {
+        struct byte_stream input; stream_init_from_data(&input, wire.data, wire.size);
+        ok = transaction_deserialize(&decoded, &input) && !stream_remaining(&input) &&
+            decoded.overwintered == (group != 0) && decoded.version_group_id == group &&
+            transaction_hash_serialized(cb, &fresh) && uint256_eq(&fresh, &cb->hash) &&
+            uint256_eq(&fresh, &tmpl->block.header.hashMerkleRoot);
+    }
+    transaction_free(&decoded); stream_free(&wire);
+    return ok;
+}
+
 /* A real template at H1 uses the selected epoch shape. The normal miner
  * updates extranonce before solving; check the final wire and Merkle root. */
 static bool mining_h1_wire_case(int32_t overwinter, int32_t sapling,
@@ -466,27 +488,7 @@ static bool mining_h1_wire_case(int32_t overwinter, int32_t sapling,
     if (ok) {
         unsigned nonce = 0;
         increment_extra_nonce(&tmpl->block, &parent, &nonce);
-        struct transaction *cb = &tmpl->block.vtx[0];
-        struct byte_stream wire; stream_init(&wire, 256);
-        struct uint256 fresh;
-        struct transaction decoded; transaction_init(&decoded);
-        ok = transaction_serialize(cb, &wire) && !wire.error && wire.size >= 8;
-        if (ok) {
-            uint32_t got = ReadLE32(wire.data);
-            ok = got == header;
-            if (group) {
-                uint32_t gid = ReadLE32(wire.data + 4);
-                ok = ok && gid == group;
-            }
-        }
-        if (ok) {
-            struct byte_stream input; stream_init_from_data(&input, wire.data, wire.size);
-            ok = transaction_deserialize(&decoded, &input) && !stream_remaining(&input) &&
-                decoded.overwintered == (group != 0) && decoded.version_group_id == group &&
-                transaction_hash_serialized(cb, &fresh) && uint256_eq(&fresh, &cb->hash) &&
-                uint256_eq(&fresh, &tmpl->block.header.hashMerkleRoot);
-        }
-        transaction_free(&decoded); stream_free(&wire);
+        ok = mining_h1_wire_check(tmpl, header, group);
     }
     if (tmpl) { block_template_free(tmpl); free(tmpl); }
     coins_view_cache_free(&cache); tx_mempool_free(&pool); main_state_free(&ms);
