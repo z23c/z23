@@ -27,4 +27,14 @@ enum { IRONWOOD_POSTNU63_LOOKUP_GATES = 15, IRONWOOD_POSTNU63_LOOKUP_BYTES = 15 
 struct zcl_result ironwood_postnu63_lookup_gates(const struct ironwood_postnu63_stage *stage,
     uint64_t action, const uint8_t omega[32], const uint8_t *program, size_t program_size,
     uint8_t *out, size_t out_size);
+enum { IRONWOOD_POSTNU63_PERMUTATION_GATES = 7, IRONWOOD_POSTNU63_PERMUTATION_BYTES = 7 * 32 };
+/* The permutation program additionally uses special indices 506..508 for x,
+ * delta and this action's instance evaluation, 620..634 for sigma evaluations,
+ * and 640..647 for this action's permutation-product evaluations. Exactly
+ * seven E instructions are required. Omega, delta and the program, including
+ * column bindings, are caller-supplied metadata and are not authenticated.
+ * Output must not overlap any input and remains unchanged on failure. */
+struct zcl_result ironwood_postnu63_permutation_gates(const struct ironwood_postnu63_stage *stage,
+    uint64_t action, const uint8_t omega[32], const uint8_t delta[32],
+    const uint8_t *program, size_t program_size, uint8_t *out, size_t out_size);
 #endif
