@@ -41,15 +41,15 @@ static bool interpolate(const struct ironwood_multiopen_set *s, const BIGNUM *x3
                         const BIGNUM *prime, BN_CTX *ctx, BIGNUM *result)
 {
     BN_CTX_start(ctx);
-    BIGNUM *p[IRONWOOD_MULTIOPEN_POINTS], *q[IRONWOOD_MULTIOPEN_POINTS];
-    for (size_t j = 0; j < s->count; ++j) { p[j] = BN_CTX_get(ctx); q[j] = BN_CTX_get(ctx); }
+    BIGNUM *p[IRONWOOD_MULTIOPEN_POINTS];
+    for (size_t j = 0; j < s->count; ++j) p[j] = BN_CTX_get(ctx);
     BIGNUM *term = BN_CTX_get(ctx), *a = BN_CTX_get(ctx), *b = BN_CTX_get(ctx), *inv = BN_CTX_get(ctx);
     bool ok = inv != NULL;
     for (size_t j = 0; ok && j < s->count; ++j)
-        ok = BN_lebin2bn(s->points[j], 32, p[j]) && BN_lebin2bn(s->evaluations[j], 32, q[j]);
-    if (ok) BN_zero(result);
+        ok = BN_lebin2bn(s->points[j], 32, p[j]) != NULL;
+    if (ok) ok = BN_set_word(result, 0);
     for (size_t j = 0; ok && j < s->count; ++j) {
-        ok = BN_copy(term, q[j]) != NULL;
+        ok = BN_lebin2bn(s->evaluations[j], 32, term) != NULL;
         for (size_t k = 0; ok && k < s->count; ++k) if (j != k)
             ok = lagrange_factor(term, a, b, inv, x3, p[j], p[k], prime, ctx);
         if (ok) ok = BN_mod_add(result, result, term, prime, ctx);
@@ -77,7 +77,7 @@ static bool fold(const struct ironwood_multiopen_set *sets, const BIGNUM *prime,
     BIGNUM *c2 = BN_CTX_get(ctx), *c3 = BN_CTX_get(ctx), *c4 = BN_CTX_get(ctx);
     BIGNUM *v = BN_CTX_get(ctx), *term = BN_CTX_get(ctx);
     bool ok = term && BN_lebin2bn(x2, 32, c2) && BN_lebin2bn(x3, 32, c3) && BN_lebin2bn(x4, 32, c4);
-    if (ok) BN_zero(v);
+    if (ok) ok = BN_set_word(v, 0);
     for (size_t i = 0; ok && i < IRONWOOD_MULTIOPEN_SETS; ++i)
         ok = set_value(&sets[i], c3, prime, ctx, term) && BN_mod_mul(v, v, c2, prime, ctx) &&
              BN_mod_add(v, v, term, prime, ctx);
