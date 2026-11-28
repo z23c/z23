@@ -1647,6 +1647,32 @@ static int cas_test_research_unmarked_refuses(void)
     return failures;
 }
 
+static int cas_test_research_direct_refuses(void)
+{
+    int failures = 0;
+    TEST("direct mode refuses research selectors before writing") {
+        char home[PATH_MAX], target[PATH_MAX + 32], out[8192];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_research_direct") != NULL);
+        ASSERT(snprintf(target, sizeof(target), "%s/target", home) > 0);
+        const char *selectors[] = {"-testnet-profile=ironwood",
+            "--testnet-profile=ironwood", "-testnet-profile=unknown", "-testnet-profile"};
+        bool refused = true;
+        for (size_t i = 0; i < sizeof(selectors) / sizeof(selectors[0]); i++) {
+            char *argv[] = {(char *)CAS_BIN, (char *)"--importchainstate",
+                            home, target, (char *)selectors[i], NULL};
+            int rc = cas_run(argv, home, out, sizeof(out));
+            struct stat st;
+            refused = refused && rc != 0 &&
+                strstr(out, "Invalid or unsafe testnet profile invocation.") &&
+                lstat(target, &st) != 0 && errno == ENOENT;
+        }
+        (void)test_rm_rf_recursive(home);
+        ASSERT(refused);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int cas_test_research_marker_guards(void)
 {
     int failures = 0;
@@ -1858,6 +1884,7 @@ int test_cli_argv_strict(void)
     failures += cas_test_filesync_endpoint();
     failures += cas_test_research_refusals();
     failures += cas_test_research_unmarked_refuses();
+    failures += cas_test_research_direct_refuses();
     failures += cas_test_research_marker_guards();
     failures += cas_test_research_private_directory();
     failures += cas_test_research_concurrent_creation();

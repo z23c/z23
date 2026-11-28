@@ -1153,12 +1153,20 @@ static bool main_research_unselected_ok(int argc, char **argv)
 #endif
 }
 
+static bool main_research_direct_mode(int argc, char **argv)
+{
+    return argc > 1 && !strncmp(argv[1], "--", 2) &&
+        strcmp(argv[1], "--agent") && strcmp(argv[1], "--status") &&
+        strcmp(argv[1], "--summary");
+}
+
 static bool main_research_prepare(int argc, char ***args,
                                   struct main_research_selection *research,
                                   char *path, size_t capacity)
 {
     char **argv = *args;
-    if (is_cli_mode(argc, argv)) return main_research_unselected_ok(argc, argv);
+    if (is_cli_mode(argc, argv) && !main_research_direct_mode(argc, argv))
+        return main_research_unselected_ok(argc, argv);
     if (!main_research_scan(argc, argv, research) ||
         (research->profile && (!main_research_node_only(argc, argv) ||
          !main_research_path(argc, argv, research, path, capacity)))) {
