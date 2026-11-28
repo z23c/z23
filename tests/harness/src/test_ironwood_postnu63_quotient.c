@@ -4,7 +4,10 @@
 #include "services/ironwood_postnu63_quotient.h"
 #include "services/ironwood_postnu63_gates.h"
 #include "services/ironwood_postnu63_domain.h"
+#include "services/ironwood_postnu63_pinned_h.h"
+#include "primitives/transaction_v6_wire.h"
 #include "base/hex.h"
+#include "base/serialize_le.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -252,6 +255,95 @@ static int gate_cases(void)
     return 0;
 }
 
+/* Reconstruct a structural v6 wire around the public statement(s) and full
+ * proof; signatures and unrelated ciphertext bytes are fixture placeholders. */
+static bool pinned_view(const uint8_t *input, size_t actions, size_t proof_size,
+                        uint8_t wire[9400], struct v6_wire_view *view)
+{
+    static const uint8_t header[] = {6,0,0,128,0x98,0xb6,0x84,0xd8,0x5b,0x16,0xa5,0x37,
+        0x51,0xce,0x52,0xe8,0x5c,0x0e,0x5f,0x0f,0,0,0,0,0,0};
+    size_t flags = 26 + actions * 820, anchor = flags + 9, proof = anchor + 35;
+    size_t total = proof + proof_size + actions * 64 + 64;
+    if (!actions || actions > 2 || total > 9400 || proof_size > 65535) return false;
+    memset(wire, 0, total); memcpy(wire, header, 25); wire[25] = (uint8_t)actions;
+    for (size_t i = 0; i < actions; ++i) memcpy(wire + 26 + i * 820, input + i * 163 + 32, 128);
+    wire[flags] = (uint8_t)(input[160] | (input[161] << 1) | ((1u - input[162]) << 2));
+    memcpy(wire + anchor, input, 32); wire[anchor + 32] = 0xfd;
+    zcl_write_u16_le(wire + anchor + 33, (uint16_t)proof_size);
+    memcpy(wire + proof, input + actions * 163, proof_size);
+    return v6_core_parse(wire, total, view) == V6_WIRE_OK;
+}
+
+static bool pinned_stage(const struct v6_wire_view *view, struct ironwood_postnu63_stage *stage)
+{
+    /* Ten public k=11 Lagrange commitments plus W, retained from the pinned
+     * upstream oracle; fixture SHA-256 6863c48b9bc83d6e10eb4cdfdb55b8db2c62c27bd426494ac525a4514249f77f. */
+    uint8_t basis[11][32], vk[32];
+    if (!fixture_read("tests/fixtures/ironwood/postnu63-instance-basis.bin", (uint8_t *)&basis, sizeof basis) ||
+        !zcl_hex_decode("99b4fa5429bf1f72bbba9c1620e201206287d2cc6373012d5bb99fedb7f72205", vk, 32)) return false;
+    struct zcl_result r = ironwood_postnu63_first_challenge(view, vk, (const uint8_t (*)[32])basis, basis[10], stage);
+    if (r.ok) r = ironwood_postnu63_lookup_challenges(stage);
+    if (r.ok) r = ironwood_postnu63_yx_challenges(stage);
+    if (r.ok) r = ironwood_postnu63_evaluations(stage);
+    return r.ok;
+}
+
+static int pinned_refusals(const struct ironwood_postnu63_stage *stage,
+                           struct ironwood_postnu63_constraint_programs *programs,
+                           uint8_t *custom, uint8_t *permutation, uint8_t *lookup)
+{
+    uint8_t out[32], before[32];
+    memset(out, 0xa5, sizeof out); memcpy(before, out, sizeof out);
+    uint8_t *p[3] = {custom, permutation, lookup};
+    for (size_t i = 0; i < 3; ++i) {
+        p[i][0] ^= 1;
+        bool refused = !ironwood_postnu63_pinned_h(stage, programs, out).ok;
+        p[i][0] ^= 1;
+        Q_CHECK(refused && !memcmp(out, before, sizeof out));
+    }
+    --programs->permutation.size;
+    Q_CHECK(!ironwood_postnu63_pinned_h(stage, programs, out).ok && !memcmp(out, before, sizeof out));
+    ++programs->permutation.size;
+    struct ironwood_postnu63_stage invalid = *stage;
+    invalid.phase = IRONWOOD_POSTNU63_Y_X;
+    Q_CHECK(!ironwood_postnu63_pinned_h(&invalid, programs, out).ok && !memcmp(out, before, sizeof out));
+    invalid = *stage; invalid.actions = UINT64_MAX;
+    Q_CHECK(!ironwood_postnu63_pinned_h(&invalid, programs, out).ok && !memcmp(out, before, sizeof out));
+    return 0;
+}
+
+static int pinned_case(const char *proof_path, size_t actions, const char *expected_hex)
+{
+    uint8_t input[7590], wire[9400], custom[48484], permutation[997], lookup[1159], expected[32], h[32];
+    size_t proof_size = 2720 + actions * 2272;
+    Q_CHECK(fixture_read(proof_path, input, actions * 163 + proof_size));
+    Q_CHECK(fixture_read("tests/fixtures/ironwood/postnu63-custom-gates.bin", custom, sizeof custom));
+    Q_CHECK(fixture_read("tests/fixtures/ironwood/postnu63-permutation-gates.bin", permutation, sizeof permutation));
+    Q_CHECK(fixture_read("tests/fixtures/ironwood/postnu63-lookup-gates.bin", lookup, sizeof lookup));
+    Q_CHECK(zcl_hex_decode(expected_hex, expected, sizeof expected));
+    struct v6_wire_view view;
+    Q_CHECK(pinned_view(input, actions, proof_size, wire, &view));
+    struct ironwood_postnu63_stage stage, saved;
+    Q_CHECK(pinned_stage(&view, &stage));
+    memcpy(&saved, &stage, sizeof saved);
+    struct ironwood_postnu63_constraint_programs programs = {
+        {custom, sizeof custom}, {permutation, sizeof permutation}, {lookup, sizeof lookup}
+    };
+    Q_CHECK(ironwood_postnu63_pinned_h(&stage, &programs, h).ok && !memcmp(h, expected, 32));
+    Q_CHECK(!memcmp(&stage, &saved, sizeof saved));
+    Q_CHECK(!pinned_refusals(&stage, &programs, custom, permutation, lookup));
+    return 0;
+}
+
+static int pinned_cases(void)
+{
+    Q_CHECK(!pinned_case("tests/fixtures/ironwood/postnu63-coinbase.bin", 1,
+                         "4b60b489fba78511e7852cdfb8cd499053d50db264e2e389bee82f12d23f9415"));
+    Q_CHECK(!pinned_case("tests/fixtures/ironwood/postnu63-funded.bin", 2,
+                         "b6a266e4e45ca24645108adbdaba49e232a16542d4c6a2fe0635e2bb7c5de02a"));
+    return 0;
+}
+
 int test_ironwood_postnu63_quotient(void)
 {
     Q_CHECK(!quotient_case("tests/fixtures/ironwood/postnu63-quotient-one.bin", 1,
@@ -260,6 +352,7 @@ int test_ironwood_postnu63_quotient(void)
                            "b6a266e4e45ca24645108adbdaba49e232a16542d4c6a2fe0635e2bb7c5de02a"));
     Q_CHECK(!quotient_refusals());
     Q_CHECK(!gate_cases());
+    Q_CHECK(!pinned_cases());
     puts("PostNu6_3 quotient public trace cases passed");
     return 0;
 }

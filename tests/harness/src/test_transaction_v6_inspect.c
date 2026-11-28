@@ -18,6 +18,8 @@
 #include "transaction_v6_ironwood_fixture.h"
 #include "transaction_v6_recipient_fixture.h"
 
+bool ironwood_opening_equation_case(const struct v6_wire_view *view, const struct ironwood_postnu63_stage *stage);
+
 /* ZIP 229 empty_orchard_and_ironwood upstream conformance vector. */
 static const uint8_t empty[] = {6,0,0,128,0x98,0xb6,0x84,0xd8,0x5b,0x16,0xa5,0x37,
     0x51,0xce,0x52,0xe8,0x5c,0x0e,0x5f,0x0f,0,0,0,0,0,0};
@@ -790,8 +792,8 @@ static bool opening_trace_matches(const struct ironwood_postnu63_opening *openin
     sha256_write(&hash, opening->x4, 32);
     sha256_write(&hash, opening->xi, 32);
     sha256_write(&hash, opening->z, 32);
-    sha256_write(&hash, opening->round_challenges[0], sizeof opening->round_challenges);
-    sha256_write(&hash, opening->set_evaluations[0], sizeof opening->set_evaluations);
+    sha256_write(&hash, (const uint8_t *)&opening->round_challenges, sizeof opening->round_challenges);
+    sha256_write(&hash, (const uint8_t *)&opening->set_evaluations, sizeof opening->set_evaluations);
     sha256_write(&hash, opening->c, 32);
     sha256_write(&hash, opening->f, 32);
     sha256_finalize(&hash, got);
@@ -877,7 +879,8 @@ static bool check_stage(const struct v6_wire_view *view, const char *path, const
         !stage_fixture(view, path, input, size) || !stage_wire(view, input, size, wire, sizeof wire, &full) ||
         !ironwood_postnu63_first_challenge(&full, vk, basis, w, &stage).ok ||
         stage.proof.position != view->ironwood.count * 320 || memcmp(stage.theta, expected, 32)) return false;
-    return check_lookup_stage(&stage, wire) && check_yx_stage(&stage, wire) && check_eval_stage(&stage, wire) && stage_refusals(&full, wire, size, vk, basis, w, &stage);
+    return check_lookup_stage(&stage, wire) && check_yx_stage(&stage, wire) && check_eval_stage(&stage, wire) &&
+        ironwood_opening_equation_case(&full, &stage) && stage_refusals(&full, wire, size, vk, basis, w, &stage);
 }
 
 /* Public coinbase fixture: Orchard 0.16.0 PostNu6_3, R1 evidence

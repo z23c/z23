@@ -22,4 +22,11 @@ struct ironwood_multiopen_commitment {
 struct zcl_result ironwood_multiopen_commitment_fold(
     const struct ironwood_multiopen_commitment *items, size_t count,
     const uint8_t q_prime[32], const uint8_t x1[32], const uint8_t x4[32], uint8_t out[32]);
+/* Callback is invoked once per item in reverse ordinal order; its result is
+ * copied before the next call. It must not mutate the fold inputs. */
+typedef struct zcl_result (*ironwood_multiopen_item_at)(void *context, size_t ordinal,
+    struct ironwood_multiopen_commitment *out);
+struct zcl_result ironwood_multiopen_commitment_fold_stream(
+    ironwood_multiopen_item_at item_at, void *context, size_t count,
+    const uint8_t q_prime[32], const uint8_t x1[32], const uint8_t x4[32], uint8_t out[32]);
 #endif

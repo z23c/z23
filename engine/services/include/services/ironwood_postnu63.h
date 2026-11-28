@@ -63,4 +63,13 @@ struct ironwood_postnu63_opening {
  * does not evaluate the opening equation. */
 struct zcl_result ironwood_postnu63_opening_transcript(
     const struct ironwood_postnu63_stage *stage, struct ironwood_postnu63_opening *out);
+/* Frame a full wire view through x1 using the pinned PostNu6_3 VK scalar
+ * and instance commitment basis. Keep input bytes alive and disjoint from
+ * out. Failure preserves out. */
+/* Derive one public instance commitment using the pinned PostNu6_3 basis.
+ * Output is unchanged on failure. */
+struct zcl_result ironwood_postnu63_instance_commitment(const struct v6_wire_view *view,
+    uint64_t action, uint8_t out[32]);
+struct zcl_result ironwood_postnu63_prepare_opening(const struct v6_wire_view *view,
+                                                    struct ironwood_postnu63_stage *out);
 #endif
