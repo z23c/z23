@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the intake rule gate. */
+ZCL_MODULE_CAPABILITY("engine/services/src/research_rules_gate.c", CAP_FS_WRITE, "resolves a candidate's rules through the rule resolver, whose window the block-file reader reads; that storage module also writes block files, so its whole interface is rated write-reaching")
