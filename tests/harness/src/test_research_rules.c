@@ -428,19 +428,24 @@ static int disk_resolve_checks(struct fixture *f, const char *dir)
     return 0;
 }
 
-/* One byte of a filed window block's header changed in place: the frame
+/* One byte of a filed window block's nonce changed in place: the frame
  * still reads, but the body no longer hashes to its index entry. */
-static bool disk_tamper(const char *dir, const struct disk_block_pos *pos)
+static bool disk_tamper(const char *dir, const struct disk_block_pos *pos,
+                        const struct uint256 *nonce)
 {
     char path[PATH_MAX];
     get_block_pos_filename(path, sizeof(path), dir, pos, "blk");
     FILE *file = fopen(path, "r+b");
     if (!file) return false;
-    unsigned char byte = 0;
-    /* Past the frame's magic and size, the header's nonce begins at 68. */
-    bool ok = fseek(file, (long)pos->nPos + 8 + 68, SEEK_SET) == 0 &&
-              fread(&byte, 1, 1, file) == 1 && fseek(file, -1, SEEK_CUR) == 0 &&
-              fputc(byte ^ 1, file) != EOF;
+    /* The index position addresses the body past the frame's magic and
+     * size, so the nonce is at 108: version, three hashes, time and bits.
+     * The bytes found there must be the filed block's own nonce. */
+    unsigned char seen[32];
+    bool ok = fseek(file, (long)pos->nPos + 108, SEEK_SET) == 0 &&
+              fread(seen, 1, sizeof seen, file) == sizeof seen &&
+              memcmp(seen, nonce->data, sizeof seen) == 0 &&
+              fseek(file, -(long)sizeof seen, SEEK_CUR) == 0 &&
+              fputc((int)(seen[0] ^ 1), file) != EOF;
     return fclose(file) == 0 && ok;
 }
 
@@ -452,7 +457,7 @@ static int disk_hold_checks(struct fixture *f, const char *dir, const char *base
                             const struct disk_block_pos *window)
 {
     struct research_rules_state state = { .active = {true, true} };
-    CHECK(disk_tamper(dir, window));
+    CHECK(disk_tamper(dir, window, &f->blocks[DISK_WINDOW_PARENT].header.nNonce));
     CHECK(research_rules_for_index(&f->binding, &f->index[DISK_WINDOW_PARENT], dir,
                                    &state).code == RESEARCH_RULES_UNAVAILABLE);
     CHECK(state.active[0] && state.active[1]);
