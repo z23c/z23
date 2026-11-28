@@ -159,6 +159,17 @@ static bool mining_batch_ports_valid(const struct rnf *e)
            e->port[1] != 28023 && e->port[1] != 28033;
 }
 
+static bool mining_batch_run(struct rnf *e, char digest[65])
+{
+    if (!rnf_setup(e, "mining_batch") || !mining_batch_ports_valid(e) ||
+        !mining_batch_catalog(e, digest)) return false;
+    if (setenv("HOME", e->work, 1) != 0 ||
+        setenv("CREDENTIALS_DIRECTORY", e->cred, 1) != 0) return false;
+    if (!mining_batch_start(e, digest) || !mining_batch_up(e)) return false;
+    const char *address = "tmQMh5UwwJGfi53XvgjVZjTGo6SzZGVz6Q6";
+    return mining_batch_fund(e, address) && mining_batch_verify(e, address, digest);
+}
+
 static bool mining_batch_real_node(void)
 {
     struct rnf e = {0};
@@ -167,12 +178,7 @@ static bool mining_batch_real_node(void)
     char *home = old_home ? strdup(old_home) : NULL;
     char *cred = old_cred ? strdup(old_cred) : NULL;
     if ((old_home && !home) || (old_cred && !cred)) { free(home); free(cred); return false; }
-    bool ok = rnf_setup(&e, "mining_batch");
-    if (ok) ok = mining_batch_ports_valid(&e) && mining_batch_catalog(&e, digest);
-    if (ok) ok = setenv("HOME", e.work, 1) == 0 && setenv("CREDENTIALS_DIRECTORY", e.cred, 1) == 0;
-    if (ok) ok = mining_batch_start(&e, digest) && mining_batch_up(&e);
-    const char *address = "tmQMh5UwwJGfi53XvgjVZjTGo6SzZGVz6Q6";
-    if (ok) ok = mining_batch_fund(&e, address) && mining_batch_verify(&e, address, digest);
+    bool ok = mining_batch_run(&e, digest);
     if (!ok && e.work[0]) rnf_log_tail(&e);
     rnf_cleanup(&e);
     if (home) setenv("HOME", home, 1); else unsetenv("HOME");

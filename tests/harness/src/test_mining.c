@@ -73,6 +73,7 @@ static bool mining_cli_failure_visible(const struct json_value *error, const cha
         size_t got = fread(rendered, 1, sizeof(rendered) - 1, err);
         rendered[got] = '\0';
         ok = ok && strstr(rendered, hash) && strstr(rendered, "13") &&
+             strstr(rendered, "code -1") &&
              strstr(rendered, "fixture-second-submit");
     }
     if (out) fclose(out);
@@ -103,7 +104,8 @@ static int mining_partial_failure(struct rpc_table *table, struct main_state *ms
         json_get_int(json_get(&out, "code")) == -1 && hashes &&
         !strcmp(json_get_str(json_at(hashes, 0)), f.accepted_hash) &&
         f.accepted_hash[0] && strstr(reason, f.accepted_hash) &&
-        strstr(reason, "13") && mining_cli_failure_visible(&out, f.accepted_hash));
+        strstr(reason, "13") && strstr(reason, "code -1") &&
+        mining_cli_failure_visible(&out, f.accepted_hash));
     json_free(&params);
     json_free(&out);
     active_chain_move_window_tip(&ms->chain_active, &ancestors[11]);

@@ -358,7 +358,7 @@ static bool mining_report_submit_failure(struct json_value *result, int height,
     json_init(result);
     json_set_object(result);
     char *message = mining_failure_message(&hashes, height, state);
-    bool ok = message && json_push_kv_int(result, "code", -1) &&
+    bool ok = message && json_push_kv_int(result, "code", MINING_SUBMIT_ERROR_CODE) &&
               json_push_kv_str(result, "message", message) &&
               json_push_kv_int(result, "height", height) &&
               json_push_kv(result, "hashes", &hashes);

@@ -2,13 +2,14 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #ifndef ZCL_MINING_CONTROLLER_FAILURE_H
 #define ZCL_MINING_CONTROLLER_FAILURE_H
+enum { MINING_SUBMIT_ERROR_CODE = -1 };
 static char *mining_failure_message(const struct json_value *hashes, int height,
                                     const struct validation_state *state)
 {
     char reason[MAX_REJECT_REASON + 64], prefix[MAX_REJECT_REASON + 160];
     format_state_message(state, reason, sizeof(reason));
-    int written = snprintf(prefix, sizeof(prefix), "Mining failed at height %d: %s; accepted hashes: ",
-                           height, reason[0] ? reason : "reducer rejected block");
+    int written = snprintf(prefix, sizeof(prefix), "Mining failed at height %d (code %d): %s; accepted hashes: ",
+                           height, MINING_SUBMIT_ERROR_CODE, reason[0] ? reason : "reducer rejected block");
     if (written < 0 || (size_t)written >= sizeof(prefix)) return NULL;
     size_t len = json_write(hashes, NULL, 0);
     if (len > SIZE_MAX - (size_t)written - 1) return NULL;
