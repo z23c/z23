@@ -880,6 +880,38 @@ static int bil_conflicting_body_refusal(const struct chain_research_descriptor *
     return failures;
 }
 
+static int bil_mixed_genesis_refusal(const struct chain_research_descriptor *profile)
+{
+    int failures = 0;
+    char dir[256], sentinel[320], blocks[320];
+    if (!test_mkdtemp(dir, sizeof dir, "bil_mixed_genesis")) return 1;
+    snprintf(sentinel, sizeof sentinel, "%s/sentinel", dir);
+    FILE *f = fopen(sentinel, "wb");
+    bool seeded = f && fputs("preserve", f) >= 0;
+    if (f && fclose(f) != 0) seeded = false;
+    struct main_state ms; main_state_init(&ms);
+    struct uint256 foreign = {0}; foreign.data[0] = 42;
+    struct block_index *good = chainstate_insert_block_index((struct chainstate *)&ms,
+        &profile->chain->consensus.hashGenesisBlock);
+    struct block_index *bad = chainstate_insert_block_index((struct chainstate *)&ms, &foreign);
+    if (good) good->nHeight = 0;
+    if (bad) bad->nHeight = 0;
+    struct bil_file_snapshot before, after;
+    bool captured = seeded && bil_snapshot_take(dir, &before);
+    struct zcl_result result = load_block_index_with_genesis(&ms, profile->chain, NULL, false,
+        profile->genesis_wire, profile->genesis_wire_len, dir);
+    snprintf(blocks, sizeof blocks, "%s/blocks", dir);
+    struct stat st;
+    BIL_CHECK("bil: mixed genesis indexes refuse before any body write",
+              good && bad && captured && !result.ok &&
+              strstr(result.message, "foreign research genesis") &&
+              stat(blocks, &st) != 0 && errno == ENOENT &&
+              bil_snapshot_take(dir, &after) && bil_snapshot_equal(&before, &after));
+    main_state_free(&ms);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static int bil_research_foreign_index(const struct chain_research_descriptor *profile)
 {
     int failures = 0;
@@ -935,6 +967,7 @@ static int bil_research_genesis_body(void)
         failures += bil_foreign_flat_refusal(profile);
         failures += bil_conflicting_body_refusal(profile);
         failures += bil_hydrate_genesis_gate(profile);
+        failures += bil_mixed_genesis_refusal(profile);
         chain_params_select(CHAIN_REGTEST);
     } else BIL_CHECK("bil: select research for ladder refusals", false);
     block_index_hdrext_free(&g);
