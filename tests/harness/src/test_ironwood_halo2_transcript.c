@@ -31,10 +31,43 @@ static const struct trace_row trace[] = {
     {'C', "a09c11c2e91c6dc9a9f795bcd1c22188574cdf0f0ce367360a76ec763599071028ce68446f4bb788539b33e3ff1cd467968472df6966c0a76de16746e69c8dfb"},
 };
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "transcript line %d: %s\n", __LINE__, #x); return 1; } } while (0)
+static int reduction_checks(void)
+{
+    /* Fp modulus from pasta_curves 0.5.1; the zero-extended modulus and
+     * its immediate neighbours are important little-endian boundaries. */
+    static const char modulus[] = "01000000ed302d991bf94c09fc98462200000000000000000000000000000040";
+    uint8_t wide[64] = {0}, out[32], expected[32], saved[32];
+    CHECK(zcl_hex_decode(modulus, wide, 32));
+    CHECK(ironwood_halo2_vesta_scalar(wide, 64, out, 32).ok);
+    memset(expected, 0, sizeof expected);
+    CHECK(!memcmp(out, expected, 32));
+    --wide[0];
+    CHECK(ironwood_halo2_vesta_scalar(wide, 64, out, 32).ok);
+    CHECK(!memcmp(out, wide, 32));
+    wide[0] += 2;
+    CHECK(ironwood_halo2_vesta_scalar(wide, 64, out, 32).ok);
+    expected[0] = 1;
+    CHECK(!memcmp(out, expected, 32));
+    memset(out, 0xa5, sizeof out);
+    memcpy(saved, out, sizeof out);
+    CHECK(!ironwood_halo2_vesta_scalar(wide, 63, out, 32).ok);
+    CHECK(!ironwood_halo2_vesta_scalar(NULL, 64, out, 32).ok);
+    CHECK(!ironwood_halo2_vesta_scalar(wide, 64, out, 31).ok);
+    CHECK(!memcmp(out, saved, sizeof out));
+    CHECK(ironwood_halo2_vesta_scalar(wide, 64, wide, 32).ok);
+    CHECK(!memcmp(wide, expected, 32));
+    return 0;
+}
 int test_ironwood_halo2_transcript(void)
 {
+    static const char *reduced[] = {
+        "e94f2b398553e648c8b66098b1f34044c36d84e8d55e1f0bf062df0d2cce732b",
+        "3e5eacc9e7be31c058a0bc9863c5fb90fd469c0d9d6c5ae514b19af153dcd613"
+    };
     struct ironwood_halo2_transcript t = {0};
-    uint8_t bytes[64], expected[64], untouched[64];
+    uint8_t bytes[64], expected[64], untouched[64], scalar[32], scalar_expected[32];
+    size_t challenge_count = 0;
+    CHECK(reduction_checks() == 0);
     CHECK(!ironwood_halo2_transcript_challenge(&t, bytes, 64).ok);
     CHECK(!ironwood_halo2_transcript_init(NULL).ok);
     CHECK(ironwood_halo2_transcript_init(&t).ok);
@@ -56,7 +89,12 @@ int test_ironwood_halo2_transcript(void)
             CHECK(!memcmp(&before, &t, sizeof t));
             CHECK(ironwood_halo2_transcript_challenge(&t, bytes, 64).ok);
             CHECK(!memcmp(bytes, expected, 64));
+            CHECK(challenge_count < sizeof reduced / sizeof reduced[0]);
+            CHECK(zcl_hex_decode(reduced[challenge_count++], scalar_expected, 32));
+            CHECK(ironwood_halo2_vesta_scalar(bytes, 64, scalar, 32).ok);
+            CHECK(!memcmp(scalar, scalar_expected, 32));
         }
     }
+    CHECK(challenge_count == sizeof reduced / sizeof reduced[0]);
     return 0;
 }

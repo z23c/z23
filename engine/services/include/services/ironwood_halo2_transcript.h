@@ -27,4 +27,9 @@ struct zcl_result ironwood_halo2_transcript_scalar(struct ironwood_halo2_transcr
 /* Appends the challenge delimiter and returns 64 raw bytes; state advances. */
 struct zcl_result ironwood_halo2_transcript_challenge(struct ironwood_halo2_transcript *t,
                                                        uint8_t *out, size_t size);
+/* Reduce 64 public little-endian challenge bytes modulo the Vesta scalar
+ * field, returning 32 canonical little-endian bytes. Not constant-time; do
+ * not use for secret inputs. Supports overlapping input and output. */
+struct zcl_result ironwood_halo2_vesta_scalar(const uint8_t *wide, size_t wide_size,
+                                               uint8_t *out, size_t out_size);
 #endif

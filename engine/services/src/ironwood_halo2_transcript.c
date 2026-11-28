@@ -1,6 +1,7 @@
 /* purpose: Frame Halo2 transcript input and derive challenge bytes. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_halo2_transcript.h"
+#include "core/arith_uint256.h"
 #include <string.h>
 
 struct zcl_result ironwood_halo2_transcript_init(struct ironwood_halo2_transcript *t)
@@ -54,5 +55,32 @@ struct zcl_result ironwood_halo2_transcript_challenge(struct ironwood_halo2_tran
         return ZCL_ERR(-1, "Cannot derive challenge");
     t->hash = next;
     memcpy(out, challenge, sizeof challenge);
+    return ZCL_OK;
+}
+
+/* Vesta's scalar field is the Pallas base field Fp. The 512-bit input is
+ * public Fiat-Shamir output; this branchy reduction is not for secrets. */
+struct zcl_result ironwood_halo2_vesta_scalar(const uint8_t *wide, size_t wide_size,
+                                               uint8_t *out, size_t out_size)
+{
+    if (!wide || wide_size != 64 || !out || out_size != 32)
+        return ZCL_ERR(-1, "Invalid Vesta challenge reduction input");
+    const struct arith_uint256 modulus = { .pn = {
+        0x00000001u, 0x992d30edu, 0x094cf91bu, 0x224698fcu,
+        0, 0, 0, 0x40000000u
+    }};
+    struct arith_uint256 value = {0};
+    for (int bit = 511; bit >= 0; --bit) {
+        /* value < modulus before each step, so twice value plus one is
+         * below 2^256 and the fixed-width addition cannot overflow. */
+        arith_uint256_add(&value, &value, &value);
+        value.pn[0] |= (uint32_t)((wide[bit / 8] >> (bit % 8)) & 1u);
+        if (arith_uint256_compare(&value, &modulus) >= 0)
+            arith_uint256_sub(&value, &value, &modulus);
+    }
+    uint8_t result[32];
+    for (size_t i = 0; i < sizeof result; ++i)
+        result[i] = (uint8_t)(value.pn[i / 4] >> ((i % 4) * 8));
+    memcpy(out, result, sizeof result);
     return ZCL_OK;
 }
