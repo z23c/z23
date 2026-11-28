@@ -76,22 +76,27 @@ static bool gta_encode(const struct tx_destination *dest,
     return encode_destination(dest, pk, pk_len, sc, sc_len, out, out_size);
 }
 
+static bool gta_mining_authority(sqlite3 *db)
+{
+    uint8_t txid[32] = {0x43};
+    return db && coins_kv_ensure_schema(db) &&
+        coins_kv_add(db, txid, 0, 5000, 50, true, NULL, 0) &&
+        sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK &&
+        coins_kv_set_applied_height_in_tx(db, 51) &&
+        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK &&
+        coins_kv_mark_migration_complete(db) && coins_kv_mark_self_folded(db);
+}
+
 static int gta_testnet_refusal(const struct tx_destination *dest)
 {
     int failures = 0;
     char dir[512] = {0}, address[128] = {0}, raw[180];
     struct json_value params = {0}, result = {0};
     struct rpc_table table;
-    uint8_t txid[32] = {0x43};
     bool opened = test_mkdtemp(dir, sizeof(dir), "gta_guard") && progress_store_open(dir);
     sqlite3 *db = opened ? progress_store_db() : NULL;
     reducer_frontier_provable_tip_set(50);
-    bool ready = db && coins_kv_ensure_schema(db) &&
-        coins_kv_add(db, txid, 0, 5000, 50, true, NULL, 0) &&
-        sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK &&
-        coins_kv_set_applied_height_in_tx(db, 51) &&
-        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK &&
-        coins_kv_mark_migration_complete(db) && coins_kv_mark_self_folded(db);
+    bool ready = gta_mining_authority(db);
     chain_params_select(CHAIN_TESTNET);
     ready = ready && gta_encode(dest, address, sizeof(address));
     snprintf(raw, sizeof(raw), "[1,\"%s\"]", address);
