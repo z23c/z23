@@ -99,43 +99,13 @@ struct zcl_result ironwood_halo2_read_scalar(struct ironwood_halo2_transcript *t
     return ZCL_OK;
 }
 
-static bool vesta_affine(const EC_GROUP *curve, EC_POINT *point, BIGNUM *x,
-                         BIGNUM *y, unsigned sign, BN_CTX *ctx, uint8_t out[64])
-{
-    return EC_POINT_set_compressed_coordinates(curve, point, x, (int)sign, ctx) == 1 &&
-        EC_POINT_is_at_infinity(curve, point) == 0 &&
-        EC_POINT_is_on_curve(curve, point, ctx) == 1 &&
-        EC_POINT_get_affine_coordinates(curve, point, x, y, ctx) == 1 &&
-        BN_bn2lebinpad(x, out, 32) == 32 && BN_bn2lebinpad(y, out + 32, 32) == 32;
-}
-
-static bool pasta_decode(const uint8_t xbytes[32], unsigned sign,
-                         const struct arith_uint256 *modulus, uint8_t affine[64])
-{
-    uint8_t prime_bytes[32];
-    for (size_t i = 0; i < 32; ++i)
-        prime_bytes[i] = (uint8_t)(modulus->pn[i / 4] >> ((i % 4) * 8));
-    BN_CTX *ctx = BN_CTX_new();
-    BIGNUM *prime = BN_lebin2bn(prime_bytes, 32, NULL), *zero = BN_new(), *five = BN_new();
-    BIGNUM *x = BN_lebin2bn(xbytes, 32, NULL), *y = BN_new();
-    EC_GROUP *curve = NULL;
-    EC_POINT *point = NULL;
-    bool ok = ctx && prime && zero && five && x && y && BN_set_word(five, 5);
-    if (ok) { curve = EC_GROUP_new_curve_GFp(prime, zero, five, ctx); ok = curve != NULL; }
-    if (ok) { point = EC_POINT_new(curve); ok = point != NULL; }
-    if (ok) ok = vesta_affine(curve, point, x, y, sign, ctx, affine);
-    EC_POINT_free(point);
-    EC_GROUP_free(curve);
-    BN_free(y); BN_free(x); BN_free(five); BN_free(zero); BN_free(prime);
-    BN_CTX_free(ctx);
-    return ok;
-}
-
 /* Coordinates and proof bytes are public; BN/EC operations are variable-time. */
-struct zcl_result ironwood_pasta_point(const uint8_t encoded[32], enum ironwood_pasta_curve kind,
-                                       bool allow_identity, uint8_t affine[64])
+struct zcl_result ironwood_pasta_decode(const uint8_t encoded[32], enum ironwood_pasta_curve kind,
+                                        bool allow_identity, const EC_GROUP *group,
+                                        EC_POINT *point, BN_CTX *ctx)
 {
-    if (!encoded || !affine || (kind != IRONWOOD_PALLAS && kind != IRONWOOD_VESTA))
+    if (!encoded || !group || !point || !ctx ||
+        (kind != IRONWOOD_PALLAS && kind != IRONWOOD_VESTA))
         return ZCL_ERR(-1, "Invalid Pasta point input");
     const struct arith_uint256 *modulus = kind == IRONWOOD_PALLAS ?
         &vesta_scalar_modulus : &vesta_base_modulus;
@@ -148,12 +118,55 @@ struct zcl_result ironwood_pasta_point(const uint8_t encoded[32], enum ironwood_
     if (!field_canonical(xbytes, modulus)) return ZCL_ERR(-1, "Noncanonical Pasta point coordinate");
     if (!any && !sign) {
         if (!allow_identity) return ZCL_ERR(-1, "Pasta point identity is not permitted");
-        memset(affine, 0, 64);
-        return ZCL_OK;
+        return EC_POINT_set_to_infinity(group, point) == 1 ? ZCL_OK :
+            ZCL_ERR(-1, "Cannot set Pasta identity");
     }
-    if (!pasta_decode(xbytes, sign, modulus, affine))
+    BIGNUM *x = BN_lebin2bn(xbytes, 32, NULL);
+    bool ok = x && EC_POINT_set_compressed_coordinates(group, point, x, (int)sign, ctx) == 1 &&
+        EC_POINT_is_at_infinity(group, point) == 0 && EC_POINT_is_on_curve(group, point, ctx) == 1;
+    BN_free(x);
+    if (!ok)
         return ZCL_ERR(-1, "Cannot decode Pasta point");
     return ZCL_OK;
+}
+
+static EC_GROUP *pasta_group(const struct arith_uint256 *modulus, BN_CTX *ctx)
+{
+    uint8_t prime_bytes[32];
+    for (size_t i = 0; i < 32; ++i)
+        prime_bytes[i] = (uint8_t)(modulus->pn[i / 4] >> ((i % 4) * 8));
+    BIGNUM *prime = BN_lebin2bn(prime_bytes, 32, NULL), *zero = BN_new(), *five = BN_new();
+    EC_GROUP *group = NULL;
+    if (ctx && prime && zero && five && BN_set_word(five, 5))
+        group = EC_GROUP_new_curve_GFp(prime, zero, five, ctx);
+    BN_free(five); BN_free(zero); BN_free(prime);
+    return group;
+}
+
+struct zcl_result ironwood_pasta_point(const uint8_t encoded[32], enum ironwood_pasta_curve kind,
+                                       bool allow_identity, uint8_t affine[64])
+{
+    if (!encoded || !affine || (kind != IRONWOOD_PALLAS && kind != IRONWOOD_VESTA))
+        return ZCL_ERR(-1, "Invalid Pasta point input");
+    const struct arith_uint256 *modulus = kind == IRONWOOD_PALLAS ?
+        &vesta_scalar_modulus : &vesta_base_modulus;
+    BN_CTX *ctx = BN_CTX_new();
+    EC_GROUP *group = pasta_group(modulus, ctx);
+    BIGNUM *x = BN_new(), *y = BN_new();
+    EC_POINT *point = group ? EC_POINT_new(group) : NULL;
+    bool ok = ctx && group && x && y && point;
+    struct zcl_result result = ok ? ironwood_pasta_decode(encoded, kind, allow_identity, group, point, ctx) :
+        ZCL_ERR(-1, "Cannot initialize Pasta point decoder");
+    uint8_t value[64] = {0};
+    if (result.ok && EC_POINT_is_at_infinity(group, point) == 0) {
+        ok = EC_POINT_get_affine_coordinates(group, point, x, y, ctx) == 1 &&
+            BN_bn2lebinpad(x, value, 32) == 32 && BN_bn2lebinpad(y, value + 32, 32) == 32;
+        if (!ok) result = ZCL_ERR(-1, "Cannot encode Pasta coordinates");
+    }
+    if (result.ok) memcpy(affine, value, sizeof value);
+    EC_POINT_free(point); EC_GROUP_free(group);
+    BN_free(y); BN_free(x); BN_CTX_free(ctx);
+    return result;
 }
 
 struct zcl_result ironwood_halo2_read_point(struct ironwood_halo2_transcript *t,

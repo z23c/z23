@@ -45,21 +45,15 @@ struct zcl_result ironwood_instance_project(const struct v6_wire_view *view, uin
 
 static struct zcl_result commitment_add(const EC_GROUP *group, EC_POINT *sum,
                                          const uint8_t encoded[32], const uint8_t scalar[32],
-                                         BN_CTX *ctx)
+                                         EC_POINT *point, EC_POINT *term, BIGNUM *n, BN_CTX *ctx)
 {
-    uint8_t affine[64];
-    struct zcl_result decoded = ironwood_pasta_point(encoded, IRONWOOD_VESTA, false, affine);
+    struct zcl_result decoded = ironwood_pasta_decode(encoded, IRONWOOD_VESTA, false, group, point, ctx);
     if (!decoded.ok) return decoded;
     struct zcl_result canonical = ironwood_pasta_fp_canonical(scalar);
     if (!canonical.ok) return canonical;
-    BIGNUM *x = BN_lebin2bn(affine, 32, NULL), *y = BN_lebin2bn(affine + 32, 32, NULL);
-    BIGNUM *n = BN_lebin2bn(scalar, 32, NULL);
-    EC_POINT *p = EC_POINT_new(group), *term = EC_POINT_new(group);
-    bool ok = x && y && n && p && term;
-    if (ok) ok = EC_POINT_set_affine_coordinates(group, p, x, y, ctx) == 1 &&
-        EC_POINT_mul(group, term, NULL, p, n, ctx) == 1 &&
+    bool ok = BN_lebin2bn(scalar, 32, n) &&
+        EC_POINT_mul(group, term, NULL, point, n, ctx) == 1 &&
         EC_POINT_add(group, sum, sum, term, ctx) == 1;
-    EC_POINT_free(term); EC_POINT_free(p); BN_free(n); BN_free(y); BN_free(x);
     return ok ? ZCL_OK : ZCL_ERR(-1, "Cannot accumulate Ironwood instance point");
 }
 
@@ -87,19 +81,20 @@ struct zcl_result ironwood_instance_commitment(const struct ironwood_instance_ro
     struct zcl_result result = ironwood_pasta_vesta_modulus(modulus);
     if (!result.ok) return result;
     BN_CTX *ctx = BN_CTX_new(); BIGNUM *prime = BN_lebin2bn(modulus, 32, NULL);
-    BIGNUM *zero = BN_new(), *five = BN_new();
-    EC_GROUP *group = NULL; EC_POINT *sum = NULL;
-    bool ok = ctx && prime && zero && five && BN_set_word(five, 5);
+    BIGNUM *zero = BN_new(), *five = BN_new(), *n = BN_new();
+    EC_GROUP *group = NULL; EC_POINT *sum = NULL, *point = NULL, *term = NULL;
+    bool ok = ctx && prime && zero && five && n && BN_set_word(five, 5);
     if (ok) { group = EC_GROUP_new_curve_GFp(prime, zero, five, ctx); ok = group != NULL; }
-    if (ok) { sum = EC_POINT_new(group); ok = sum && EC_POINT_set_to_infinity(group, sum) == 1; }
+    if (ok) { sum = EC_POINT_new(group); point = EC_POINT_new(group); term = EC_POINT_new(group);
+              ok = sum && point && term; }
     result = ok ? ZCL_OK : ZCL_ERR(-1, "Cannot initialize Vesta group");
+    if (result.ok) result = ironwood_pasta_decode(w, IRONWOOD_VESTA, false, group, sum, ctx);
     for (size_t i = 0; result.ok && i < IRONWOOD_INSTANCE_ROWS; ++i)
-        result = commitment_add(group, sum, basis[i], rows->row[i], ctx);
-    const uint8_t one[32] = {1};
-    if (result.ok) result = commitment_add(group, sum, w, one, ctx);
+        result = commitment_add(group, sum, basis[i], rows->row[i], point, term, n, ctx);
     uint8_t encoded[32];
     if (result.ok) result = commitment_encode(group, sum, ctx, encoded);
     if (result.ok) memcpy(out, encoded, sizeof encoded);
-    EC_POINT_free(sum); EC_GROUP_free(group); BN_free(five); BN_free(zero); BN_free(prime); BN_CTX_free(ctx);
+    EC_POINT_free(term); EC_POINT_free(point); EC_POINT_free(sum); EC_GROUP_free(group);
+    BN_free(n); BN_free(five); BN_free(zero); BN_free(prime); BN_CTX_free(ctx);
     return result;
 }
