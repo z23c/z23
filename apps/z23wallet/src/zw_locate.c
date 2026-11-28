@@ -178,6 +178,20 @@ static void conf_str(char *dst, size_t cap, bool *seen, const char *v)
     else zw_log("locate: a zclassic.conf value is longer than %u bytes; ignored", (unsigned)(cap - 1));
 }
 
+static void conf_network_flag(const char *key, const char *value, struct conf *c)
+{
+    bool negated = !strncmp(key, "no", 2);
+    const char *name = negated ? key + 2 : key;
+    /* Beta15 treats an empty value as true and keeps the first effective setting. */
+    if (!strcmp(name, "testnet") && !c->has_testnet) {
+        c->has_testnet = true;
+        c->testnet = (!*value || atoi(value) != 0) != negated;
+    } else if (!strcmp(name, "regtest") && !c->has_regtest) {
+        c->has_regtest = true;
+        c->regtest = (!*value || atoi(value) != 0) != negated;
+    }
+}
+
 static void conf_line(struct conf *c, char *line)
 {
     char *h = strchr(line, '#');
@@ -192,8 +206,7 @@ static void conf_line(struct conf *c, char *line)
         if (c->pass[0]) zw_log_secret(c->pass);
     } else if (!strcmp(k, "datadir")) conf_str(c->datadir, sizeof(c->datadir), &c->has_datadir, v);
     else if (!strcmp(k, "rpcport") && !c->has_port) { c->has_port = true; c->port = strtol(v, NULL, 10); }
-    else if (!strcmp(k, "testnet") && !c->has_testnet) { c->has_testnet = true; c->testnet = atoi(v) != 0; }
-    else if (!strcmp(k, "regtest") && !c->has_regtest) { c->has_regtest = true; c->regtest = atoi(v) != 0; }
+    else conf_network_flag(k, v, c);
 }
 
 static void parse_conf(const char *path, struct conf *c)
@@ -242,6 +255,10 @@ static bool legacy_dir(const struct zw_options *o, char *out, size_t cap, struct
 
 static bool legacy_creds(struct zw_endpoint *ep, struct conf *c, const char *dir, struct zw_locate_report *rep)
 {
+    if (c->regtest && c->testnet) {
+        tried(rep, dir, "Invalid combination of -regtest and -testnet.");
+        return false;
+    }
     if (c->pass[0]) {
         char up[2 * ZW_CRED_MAX + 2];
         int n = snprintf(up, sizeof(up), "%s:%s", c->user, c->pass);

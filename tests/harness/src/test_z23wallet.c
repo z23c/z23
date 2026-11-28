@@ -242,6 +242,42 @@ static void test_locate_conf(void)
     zw_endpoint_wipe(&ep);
 }
 
+static void test_legacy_network_flags(void)
+{
+    static const struct { const char *conf; const char *subdir; } cases[] = {
+        { "regtest=  # enabled\n", "/regtest" },
+        { "noregtest=0\nregtest=0\n", "/regtest" },
+        { "regtest=0\nnoregtest=0\n", "" },
+        { "notestnet=0\n", "/testnet3" },
+        { "notestnet=\ntestnet=1\n", "" },
+        { "testnet=\nregtest=\n", NULL }
+    };
+    const char *dir = TMP "/legacy_flags";
+    mkdirs(dir);
+    mkdirs(TMP "/legacy_flags/regtest");
+    mkdirs(TMP "/legacy_flags/testnet3");
+    zw_mock_write_cookie(dir, COOKIE);
+    zw_mock_write_cookie(TMP "/legacy_flags/regtest", COOKIE);
+    zw_mock_write_cookie(TMP "/legacy_flags/testnet3", COOKIE);
+    struct zw_options opt = { .datadir = TMP "/legacy_flags", .profile = ZW_PROFILE_ZCLASSICD };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        struct zw_endpoint ep = {0};
+        struct zw_locate_report rep = {0};
+        write_file(dir, "zclassic.conf", cases[i].conf);
+        bool located = zw_locate(&opt, &ep, &rep);
+        if (cases[i].subdir) {
+            char path[ZW_PATH];
+            snprintf(path, sizeof(path), "%s%s", dir, cases[i].subdir);
+            CHECK("beta15 network flags select the expected cookie and port",
+                  located && !strcmp(ep.cookie_dir, path) && ep.port == (*cases[i].subdir ? 18023 : 8023));
+        } else {
+            CHECK("conflicting legacy networks are refused before using an available cookie",
+                  !located && has_reason(&rep, dir, "Invalid combination of -regtest and -testnet."));
+        }
+        zw_endpoint_wipe(&ep);
+    }
+}
+
 static void test_locate_reasons(void)
 {
     hermetic_env();
@@ -1764,6 +1800,7 @@ int test_z23wallet(void)
     test_args();
     test_locate_z23();
     test_locate_conf();
+    test_legacy_network_flags();
     test_locate_reasons();
     test_rpc();
     test_hostile_peers();
