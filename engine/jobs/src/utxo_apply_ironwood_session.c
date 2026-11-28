@@ -44,7 +44,7 @@ static bool genesis_transaction_shape(const struct transaction *tx)
     return tx->vin[0].script_sig.size <= MAX_SCRIPT_SIZE &&
         tx->vout[0].script_pub_key.size <= MAX_SCRIPT_SIZE &&
         !tx->num_joinsplit && !tx->num_shielded_spend && !tx->num_shielded_output &&
-        !tx->value_balance && !tx->v6_wire.size && !tx->v6_wire.data;
+        !tx->value_balance && !tx->ironwood_value_balance && !tx->v6_wire.size && !tx->v6_wire.data;
 }
 
 static bool genesis_body_matches(const struct block_index *bi, const struct block *block)

@@ -92,6 +92,10 @@ static bool genesis_cases(struct session_fixture *f)
     enum utxo_ironwood_result r = session_prepare(f, 0, &p);
     tx->hash.data[0] ^= 1;
     if (r != UTXO_IRONWOOD_LOCAL_ERROR || memcmp(&p, &before, sizeof p)) return false;
+    tx->ironwood_value_balance = 1;
+    r = session_prepare(f, 0, &p);
+    tx->ironwood_value_balance = 0;
+    if (r != UTXO_IRONWOOD_LOCAL_ERROR || memcmp(&p, &before, sizeof p)) return false;
     struct tx_in *vin = tx->vin;
     tx->vin = NULL;
     r = session_prepare(f, 0, &p);

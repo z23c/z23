@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+ZCL_MODULE_CAPABILITY("engine/jobs/src/utxo_apply_ironwood_session.c", CAP_FS_WRITE, "Coordinates transactional Ironwood checkpoint publication and replay.")
