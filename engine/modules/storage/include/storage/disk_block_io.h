@@ -40,7 +40,7 @@ static inline FILE *open_undo_file(const char *datadir,
  * file is opened. Ordinary profiles always refuse this entry point. */
 typedef bool (*block_encoder_fn)(const struct block *, struct byte_stream *);
 bool write_research_block_to_disk(struct block *b, struct disk_block_pos *pos,
-    const char *datadir, const unsigned char message_start[4], block_encoder_fn encoder);
+    const char *datadir, block_encoder_fn encoder);
 
 bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
                          const char *datadir,

@@ -351,8 +351,7 @@ static bool reducer_persist_ingested_body_locked(
     disk_block_pos_init(&pos);
     const struct chain_research_descriptor *profile = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
     bool research = profile && chain_research_profile_current() == profile && ctl->params == profile->chain;
-    bool written = research && reducer_body_has_v6(pblock) ? write_research_block_to_disk(pblock, &pos, bdir,
-        ctl->params->pchMessageStart, research_block_write_for_size) :
+    bool written = research && reducer_body_has_v6(pblock) ? write_research_block_to_disk(pblock, &pos, bdir, research_block_write_for_size) :
         write_block_to_disk(pblock, &pos, bdir, ctl->params->pchMessageStart);
     if (!written) {
         LOG_WARN("reducer", "body persist write failed h=%d", bi->nHeight);

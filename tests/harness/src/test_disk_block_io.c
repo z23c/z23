@@ -1522,6 +1522,11 @@ static bool research_disk_readback(struct block *b, struct disk_block_pos *pos, 
     return ok;
 }
 
+static bool oversized_encoder(const struct block *b, struct byte_stream *s)
+{
+    (void)b; s->size = s->capacity + 1; return true;
+}
+
 static int test_research_v6_disk(void)
 {
     char dir[256], path[512]; make_test_dir(dir, sizeof dir);
@@ -1529,13 +1534,15 @@ static int test_research_v6_disk(void)
     struct disk_block_pos pos; disk_block_pos_init(&pos);
     if (snprintf(path, sizeof path, "%s/blocks/blk00000.dat", dir) < 0) ok = false;
     chain_params_select(CHAIN_MAIN);
-    if (ok) ok = !write_research_block_to_disk(&b, &pos, dir, TEST_MSG_START, research_block_write_for_size) &&
+    if (ok) ok = !write_research_block_to_disk(&b, &pos, dir, research_block_write_for_size) &&
         !write_block_to_disk(&b, &pos, dir, TEST_MSG_START) && pos.nFile < 0 && access(path, F_OK) != 0;
     if (ok) ok = chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD);
+    if (ok) ok = !write_research_block_to_disk(&b, &pos, dir, oversized_encoder) &&
+        pos.nFile < 0 && access(path, F_OK) != 0;
     if (ok) b.vtx[1].ironwood_value_balance ^= 1;
-    if (ok) ok = !write_research_block_to_disk(&b, &pos, dir, TEST_MSG_START, research_block_write_for_size) && pos.nFile < 0 && access(path, F_OK) != 0;
+    if (ok) ok = !write_research_block_to_disk(&b, &pos, dir, research_block_write_for_size) && pos.nFile < 0 && access(path, F_OK) != 0;
     if (ok) b.vtx[1].ironwood_value_balance ^= 1;
-    if (ok) ok = write_research_block_to_disk(&b, &pos, dir, TEST_MSG_START, research_block_write_for_size) &&
+    if (ok) ok = write_research_block_to_disk(&b, &pos, dir, research_block_write_for_size) &&
         research_disk_readback(&b, &pos, dir);
     block_free(&b); chain_params_select(CHAIN_MAIN); cleanup_test_dir(dir);
     if (!ok) fprintf(stderr, "FAIL: private v6 block disk round-trip\n");
