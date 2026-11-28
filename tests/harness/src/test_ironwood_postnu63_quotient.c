@@ -69,8 +69,11 @@ static bool fixture_read(const char *path, uint8_t *out, size_t size)
     return fclose(f) == 0 && ok;
 }
 
-/* This serializes exactly the upstream 193 postfix expressions, whose
- * source RPN text SHA-256 is 08bb64dc0293aafcb82e61f5483c6830689d4965ea91b4088e71f6cbcfa5518f.
+/* Orchard 0.16.0 PostNu6_3 / halo2_proofs 0.4.0: 193 postfix expressions.
+ * Source text SHA-256 08bb64dc0293aafcb82e61f5483c6830689d4965ea91b4088e71f6cbcfa5518f;
+ * binary SHA-256 4f29d83389cb64af9c5fc3dccfb21a4c66570c95fbcb2c0c3a4abe844b7e50c3.
+ * R1 ironwood-custom-gates-provenance-1128/reproduce.sh records conversion;
+ * ironwood-quotient.e8m8Kt0J/gates.sh and inject.rs record upstream extraction.
  * The fixture is research data, not an authenticated verifier key. */
 static int gate_refusals(struct ironwood_postnu63_stage *stage, const uint8_t *program, size_t program_size)
 {
