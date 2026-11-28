@@ -5,9 +5,28 @@
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
 #include "validation/tx_verifier.h"
+#include "domain/consensus/sighash.h"
 #include "script/sighashtype.h"
 #include "util/log_macros.h"
 #include <string.h>
+
+void tx_sig_checker_init_full(struct tx_sig_checker *c,
+                              const struct transaction *tx,
+                              unsigned int nIn,
+                              int64_t amount,
+                              uint32_t consensus_branch_id,
+                              const struct precomputed_tx_data *txdata,
+                              const struct transaction_v6_prevout *prevouts,
+                              size_t prevout_count)
+{
+    c->tx = tx;
+    c->nIn = nIn;
+    c->amount = amount;
+    c->consensus_branch_id = consensus_branch_id;
+    c->txdata = txdata;
+    c->prevouts = prevouts;
+    c->prevout_count = prevout_count;
+}
 
 void tx_sig_checker_init(struct tx_sig_checker *c,
                          const struct transaction *tx,
@@ -16,11 +35,28 @@ void tx_sig_checker_init(struct tx_sig_checker *c,
                          uint32_t consensus_branch_id,
                          const struct precomputed_tx_data *txdata)
 {
-    c->tx = tx;
-    c->nIn = nIn;
-    c->amount = amount;
-    c->consensus_branch_id = consensus_branch_id;
-    c->txdata = txdata;
+    tx_sig_checker_init_full(c, tx, nIn, amount, consensus_branch_id, txdata,
+                             NULL, 0);
+}
+
+static bool ironwood_sighash(const struct tx_sig_checker *c,
+                             struct sighash_type hash_type,
+                             struct uint256 *result)
+{
+    const struct transaction_v6_prevout *prevouts = c->prevouts;
+    size_t prevout_count = c->prevout_count;
+    if (!prevouts || c->nIn >= prevout_count ||
+        prevouts[c->nIn].script_size > MAX_SCRIPT_SIZE ||
+        (prevouts[c->nIn].script_size && !prevouts[c->nIn].script))
+        return false;
+    struct script prevout_script;
+    script_init(&prevout_script);
+    if (prevouts[c->nIn].script_size)
+        script_set(&prevout_script, prevouts[c->nIn].script,
+                   prevouts[c->nIn].script_size);
+    return transaction_v6_sighash(
+        c->tx, prevouts, prevout_count, c->nIn, hash_type, &prevout_script,
+        c->amount, c->consensus_branch_id, result);
 }
 
 static bool check_sig_cb(const struct sig_checker *self,
@@ -43,8 +79,15 @@ static bool check_sig_cb(const struct sig_checker *self,
     struct sighash_type ht = { .raw = sig[siglen - 1] };
 
     struct uint256 sighash;
-    if (!signature_hash(script_code, c->tx, c->nIn, ht, c->amount,
-                        c->consensus_branch_id, c->txdata, &sighash))
+    bool hashed;
+    if (domain_consensus_signature_hash_version(c->tx) ==
+        DOMAIN_CONSENSUS_SIGVERSION_IRONWOOD) {
+        hashed = ironwood_sighash(c, ht, &sighash);
+    } else {
+        hashed = signature_hash(script_code, c->tx, c->nIn, ht, c->amount,
+                                c->consensus_branch_id, c->txdata, &sighash);
+    }
+    if (!hashed)
         LOG_FAIL("tx_verify", "sighash computation failed for input %u", c->nIn);
 
     return pubkey_verify(&pk, &sighash, sig, siglen - 1);

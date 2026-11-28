@@ -13,7 +13,9 @@
 #include "chain/chainparams.h"
 #include "consensus/upgrades.h"
 #include "core/uint256.h"
+#include "domain/consensus/sighash.h"
 #include "primitives/transaction.h"
+#include "primitives/transaction_v6_sighash.h"
 #include "script/interpreter.h"
 #include "script/script.h"
 #include "script/script_error.h"
@@ -139,6 +141,120 @@ static bool sv_resolve(const struct sv_resolvers *r,
 
 /* ── serial reference sweep (the original in-order loop) ──────────────────── */
 
+struct sv_resolved_prevout {
+    struct tx_out out;
+    bool ok;
+};
+
+static bool sv_ironwood_prevouts_incomplete(const struct transaction *tx,
+                                            size_t first_unresolved)
+{
+    return first_unresolved < tx->num_vin &&
+        domain_consensus_signature_hash_version(tx) ==
+            DOMAIN_CONSENSUS_SIGVERSION_IRONWOOD;
+}
+
+static bool sv_serial_input(const struct transaction *tx, size_t vi,
+                            const struct sv_resolved_prevout *resolved,
+                            const struct transaction_v6_prevout *prevouts,
+                            const struct precomputed_tx_data *txdata,
+                            int height, uint32_t flags, uint32_t branch_id,
+                            struct script_verify_summary *out)
+{
+    if (!resolved->ok) {
+        sv_write_prevout_unresolved(out, &tx->hash, (unsigned int)vi, height);
+        return false;
+    }
+    struct tx_sig_checker tsc;
+    tx_sig_checker_init_full(&tsc, tx, (unsigned int)vi, resolved->out.value,
+                             branch_id, txdata, prevouts, tx->num_vin);
+    struct sig_checker checker = tx_make_sig_checker(&tsc);
+    ScriptError serror = SCRIPT_ERR_OK;
+    out->input_count++;
+    int64_t cpu_started = clock_thread_cpu_ns();
+    uint64_t alloc_failures = zcl_alloc_failure_count();
+    bool ok = verify_script(&tx->vin[vi].script_sig,
+                            &resolved->out.script_pub_key, flags, &checker,
+                            branch_id, &serror);
+    bool local_failure = !ok &&
+        zcl_alloc_failure_count() != alloc_failures;
+    int64_t cpu_ns = clock_thread_cpu_ns() - cpu_started;
+    if (cpu_ns > 0)
+        reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
+                                         RPF_VERIFY_SCRIPT_CPU_US,
+                                         (uint64_t)cpu_ns / 1000u);
+    if (ok) {
+        out->inputs_verified++;
+        return true;
+    }
+    if (local_failure) {
+        sv_write_local_failure(out, &tx->hash, (unsigned int)vi);
+    } else {
+        out->inputs_failed++;
+        sv_write_script_invalid(out, &tx->hash, (unsigned int)vi, serror,
+                                height);
+    }
+    return false;
+}
+
+static bool sv_serial_tx(const struct transaction *tx, int height,
+                         uint32_t flags, uint32_t branch_id,
+                         const struct sv_resolvers *r,
+                         struct script_verify_summary *out)
+{
+    struct precomputed_tx_data txdata;
+    int64_t precompute_started = platform_time_monotonic_us();
+    uint64_t precompute_failures = zcl_alloc_failure_count();
+    precompute_tx_data(tx, &txdata);
+    bool precompute_oom = zcl_alloc_failure_count() != precompute_failures;
+    reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
+                                     RPF_TX_PRECOMPUTE_US,
+                              (uint64_t)(platform_time_monotonic_us() -
+                                         precompute_started));
+    /* A precompute that ran out of memory hashed short streams, so no
+     * signature check that reads them says anything about this tx. */
+    if (precompute_oom && tx->num_vin > 0) {
+        sv_write_local_failure(out, &tx->hash, 0);
+        return false;
+    }
+    if (tx->num_vin == 0)
+        return true;
+
+    struct sv_resolved_prevout *resolved =
+        zcl_calloc(tx->num_vin, sizeof(*resolved), "sv serial prevouts");
+    struct transaction_v6_prevout *prevouts =
+        zcl_calloc(tx->num_vin, sizeof(*prevouts), "sv serial prevout view");
+    if (!resolved || !prevouts) {
+        free(resolved);
+        free(prevouts);
+        sv_write_local_failure(out, &tx->hash, 0);
+        return false;
+    }
+    size_t first_unresolved = tx->num_vin;
+    for (size_t vi = 0; vi < tx->num_vin; vi++) {
+        tx_out_set_null(&resolved[vi].out);
+        resolved[vi].ok = sv_resolve(r, &tx->vin[vi].prevout,
+                                     &resolved[vi].out);
+        if (!resolved[vi].ok && first_unresolved == tx->num_vin)
+            first_unresolved = vi;
+        prevouts[vi].amount = resolved[vi].out.value;
+        prevouts[vi].script = resolved[vi].out.script_pub_key.data;
+        prevouts[vi].script_size = resolved[vi].out.script_pub_key.size;
+    }
+    bool ok = true;
+    if (sv_ironwood_prevouts_incomplete(tx, first_unresolved)) {
+        sv_write_prevout_unresolved(out, &tx->hash,
+                                    (unsigned int)first_unresolved, height);
+        ok = false;
+    }
+    for (size_t vi = 0; ok && vi < tx->num_vin; vi++)
+        ok = sv_serial_input(tx, vi, &resolved[vi], prevouts, &txdata,
+                             height, flags, branch_id, out);
+    free(resolved);
+    free(prevouts);
+    return ok;
+}
+
 static void sv_serial(const struct block *blk, int height, uint32_t flags,
                       uint32_t branch_id, const struct sv_resolvers *r,
                       struct script_verify_summary *out)
@@ -146,63 +262,9 @@ static void sv_serial(const struct block *blk, int height, uint32_t flags,
     for (size_t ti = 0; ti < blk->num_vtx; ti++) {
         const struct transaction *tx = &blk->vtx[ti];
         out->tx_count++;
-        if (transaction_is_coinbase(tx))
-            continue;
-
-        struct precomputed_tx_data txdata;
-        int64_t precompute_started = platform_time_monotonic_us();
-        uint64_t precompute_failures = zcl_alloc_failure_count();
-        precompute_tx_data(tx, &txdata);
-        bool precompute_oom = zcl_alloc_failure_count() != precompute_failures;
-        reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                                         RPF_TX_PRECOMPUTE_US,
-                                  (uint64_t)(platform_time_monotonic_us() -
-                                             precompute_started));
-        /* A precompute that ran out of memory hashed short streams, so no
-         * signature check that reads them says anything about this tx. */
-        if (precompute_oom && tx->num_vin > 0) {
-            sv_write_local_failure(out, &tx->hash, 0);
+        if (!transaction_is_coinbase(tx) &&
+            !sv_serial_tx(tx, height, flags, branch_id, r, out))
             return;
-        }
-
-        for (size_t vi = 0; vi < tx->num_vin; vi++) {
-            struct tx_out prev;
-            tx_out_set_null(&prev);
-            if (!sv_resolve(r, &tx->vin[vi].prevout, &prev)) {
-                sv_write_prevout_unresolved(out, &tx->hash, (unsigned)vi,
-                                            height);
-                return;
-            }
-            struct tx_sig_checker tsc;
-            tx_sig_checker_init(&tsc, tx, (unsigned int)vi, prev.value,
-                                branch_id, &txdata);
-            struct sig_checker checker = tx_make_sig_checker(&tsc);
-            ScriptError serror = SCRIPT_ERR_OK;
-            out->input_count++;
-            int64_t cpu_started = clock_thread_cpu_ns();
-            uint64_t alloc_failures = zcl_alloc_failure_count();
-            bool ok = verify_script(&tx->vin[vi].script_sig,
-                                    &prev.script_pub_key, flags, &checker,
-                                    branch_id, &serror);
-            bool local_failure = !ok &&
-                zcl_alloc_failure_count() != alloc_failures;
-            int64_t cpu_ns = clock_thread_cpu_ns() - cpu_started;
-            if (cpu_ns > 0)
-                reducer_stage_profile_observe_us(
-                    REDUCER_PROFILE_SCRIPT_VALIDATE,
-                    RPF_VERIFY_SCRIPT_CPU_US, (uint64_t)cpu_ns / 1000u);
-            if (ok) {
-                out->inputs_verified++;
-            } else if (local_failure) {
-                sv_write_local_failure(out, &tx->hash, (unsigned)vi);
-                return;
-            } else {
-                out->inputs_failed++;
-                sv_write_script_invalid(out, &tx->hash, (unsigned)vi, serror,
-                                        height);
-                return;
-            }
-        }
     }
 }
 
@@ -250,6 +312,9 @@ static int sv_parallel_min_inputs(void)
 struct sv_job {
     const struct transaction *tx;
     const struct precomputed_tx_data *txdata;
+    const struct transaction_v6_prevout *prevouts;
+    size_t prevout_count;
+    size_t first_unresolved;
     struct tx_out prev;
     struct uint256 txid;
     unsigned int vi;
@@ -271,11 +336,13 @@ static void sv_worker(void *j, void *u)
 {
     struct sv_job *job = j;
     struct sv_ctx *ctx = u;
-    if (!job->prevout_ok || job->precompute_oom)
+    if (!job->prevout_ok || job->precompute_oom ||
+        sv_ironwood_prevouts_incomplete(job->tx, job->first_unresolved))
         return;
     struct tx_sig_checker tsc;
-    tx_sig_checker_init(&tsc, job->tx, job->vi, job->prev.value,
-                        ctx->branch_id, job->txdata);
+    tx_sig_checker_init_full(&tsc, job->tx, job->vi, job->prev.value,
+                             ctx->branch_id, job->txdata, job->prevouts,
+                             job->prevout_count);
     struct sig_checker checker = tx_make_sig_checker(&tsc);
     ScriptError serror = SCRIPT_ERR_OK;
     int64_t cpu_started = clock_thread_cpu_ns();
@@ -333,7 +400,8 @@ void script_verify_pool_shutdown(void)
 static void sv_parallel_build_jobs(const struct block *blk,
                                    const struct sv_resolvers *r,
                                    struct precomputed_tx_data *txdata_arr,
-                                   struct sv_job *jobs)
+                                   struct sv_job *jobs,
+                                   struct transaction_v6_prevout *prevouts)
 {
     /* Build phase — SERIAL: precompute per-tx data + resolve prevouts in
      * (tx, vin) order so any in-order resolver dependency is preserved. */
@@ -352,6 +420,8 @@ static void sv_parallel_build_jobs(const struct block *blk,
                                          RPF_TX_PRECOMPUTE_US,
                                   (uint64_t)(platform_time_monotonic_us() -
                                              precompute_started));
+        size_t first = k;
+        size_t first_unresolved = tx->num_vin;
         for (size_t vi = 0; vi < tx->num_vin; vi++) {
             struct sv_job *job = &jobs[k++];
             job->precompute_oom = precompute_oom;
@@ -360,12 +430,19 @@ static void sv_parallel_build_jobs(const struct block *blk,
             job->vi = (unsigned int)vi;
             job->ti = (int)ti;
             tx_out_set_null(&job->prev);
-            if (sv_resolve(r, &tx->vin[vi].prevout, &job->prev)) {
-                job->prevout_ok = true;
+            job->prevout_ok = sv_resolve(r, &tx->vin[vi].prevout, &job->prev);
+            if (!job->prevout_ok && first_unresolved == tx->num_vin)
+                first_unresolved = vi;
+            if (job->prevout_ok)
                 job->txdata = &txdata_arr[ti];
-            } else {
-                job->prevout_ok = false;
-            }
+            prevouts[first + vi].amount = job->prev.value;
+            prevouts[first + vi].script = job->prev.script_pub_key.data;
+            prevouts[first + vi].script_size = job->prev.script_pub_key.size;
+        }
+        for (size_t vi = 0; vi < tx->num_vin; vi++) {
+            jobs[first + vi].prevouts = &prevouts[first];
+            jobs[first + vi].prevout_count = tx->num_vin;
+            jobs[first + vi].first_unresolved = first_unresolved;
         }
     }
 }
@@ -384,6 +461,15 @@ static void sv_parallel_reduce(const struct block *blk, struct sv_job *jobs,
         if (job->precompute_oom) {
             out->tx_count = (size_t)job->ti + 1;
             sv_write_local_failure(out, &job->txid, job->vi);
+            stopped = true;
+            break;
+        }
+        if (job->vi == 0 &&
+            sv_ironwood_prevouts_incomplete(job->tx, job->first_unresolved)) {
+            struct sv_job *unresolved = &jobs[i + job->first_unresolved];
+            out->tx_count = (size_t)job->ti + 1;
+            sv_write_prevout_unresolved(out, &unresolved->txid,
+                                        unresolved->vi, height);
             stopped = true;
             break;
         }
@@ -445,19 +531,22 @@ static bool sv_parallel(const struct block *blk, int height, uint32_t flags,
     struct precomputed_tx_data *txdata_arr =
         zcl_calloc(blk->num_vtx, sizeof(*txdata_arr), "sv txdata");
     struct sv_job *jobs = zcl_calloc(n_inputs, sizeof(*jobs), "sv jobs");
-    if (!txdata_arr || !jobs) {
+    struct transaction_v6_prevout *prevouts =
+        zcl_calloc(n_inputs, sizeof(*prevouts), "sv prevout views");
+    if (!txdata_arr || !jobs || !prevouts) {
         free(txdata_arr);
         free(jobs);
+        free(prevouts);
         return false;
     }
     reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                              RPF_JOB_ARRAY_ALLOCS, 2);
+                              RPF_JOB_ARRAY_ALLOCS, 3);
     reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
                               RPF_JOB_ARRAY_BYTES,
                               blk->num_vtx * sizeof(*txdata_arr) +
-                              n_inputs * sizeof(*jobs));
+                              n_inputs * (sizeof(*jobs) + sizeof(*prevouts)));
 
-    sv_parallel_build_jobs(blk, r, txdata_arr, jobs);
+    sv_parallel_build_jobs(blk, r, txdata_arr, jobs, prevouts);
 
     struct sv_ctx ctx = { .flags = flags, .branch_id = branch_id };
     uint64_t wake_us = 0, wait_us = 0;
@@ -472,6 +561,7 @@ static bool sv_parallel(const struct block *blk, int height, uint32_t flags,
 
     free(txdata_arr);
     free(jobs);
+    free(prevouts);
     return true;
 }
 

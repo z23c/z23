@@ -992,14 +992,27 @@ static bool dcs_v6_full_prevout_multi(void)
     }
     uint32_t branch = zcl_read_u32_le(tx.v6_wire.data + 8);
     struct sighash_type all = { .raw = SIGHASH_ALL };
-    struct uint256 first, second;
+    struct uint256 first, second, changed;
     bool ok = transaction_v6_sighash(&tx, prev, 2, 0, all, &current, 5000,
                                      branch, &first) &&
         transaction_v6_sighash(&tx, prev, 2, 1, all, &current, 5001,
                                branch, &second) && !uint256_eq(&first, &second);
     prev[1].amount = 5002;
+    ok = transaction_v6_sighash(&tx, prev, 2, 0, all, &current, 5000,
+                                branch, &changed) &&
+        !uint256_eq(&first, &changed) && ok;
     ok = dcs_v6_primitive_rejected(&tx, prev, 2, 1, &current, 5001, branch) && ok;
     prev[1].amount = 5001;
+    struct script other;
+    dcs_v6_one_byte_script(&other);
+    other.data[0] ^= 1;
+    prev[1].script = other.data;
+    ok = transaction_v6_sighash(&tx, prev, 2, 0, all, &current, 5000,
+                                branch, &changed) &&
+        !uint256_eq(&first, &changed) && ok;
+    prev[1].script = current.data;
+    ok = dcs_v6_primitive_rejected(&tx, prev, 2, 0, &other, 5000, branch) && ok;
+    ok = dcs_v6_primitive_rejected(&tx, NULL, 0, 0, &current, 5000, branch) && ok;
     prev[0].amount = -1;
     ok = dcs_v6_primitive_rejected(&tx, prev, 2, 1, &current, 5001, branch) && ok;
     transaction_free(&tx);

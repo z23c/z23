@@ -38,9 +38,12 @@
 #include <sqlite3.h>
 #include <stdatomic.h>
 #include "platform/time_compat.h"
+#include "core/serialize.h"
 #include "primitives/block.h"
 #include "test/test_timing_budget.h"
 #include "primitives/transaction.h"
+#include "primitives/transaction_v6_decode.h"
+#include "primitives/transaction_v6_sighash.h"
 #include "script/script.h"
 #include "script/script_error.h"
 #include "script/sighashtype.h"
@@ -450,81 +453,199 @@ static int vpd_real_sapling_small_sets(int height)
     return vpd_real_small_set(false, height) + vpd_real_small_set(true, height);
 }
 
-/* ── a signed Sapling spend, for the precompute out-of-memory case ───────── */
+/* ── signed P2PKH spends for precompute and full-prevout cases ────────────── */
 
 struct vpd_signed_prev {
-    struct script spk;
-    int64_t value;
+    struct script spk[2];
+    int64_t value[2];
+    size_t count;
 };
 
 static bool vpd_signed_prevout(const struct outpoint *po, struct tx_out *out,
                                void *user)
 {
     const struct vpd_signed_prev *p = user;
-    if (!po || !out || !p)
+    if (!po || !out || !p || po->n >= p->count)
         return false;
     tx_out_set_null(out);
-    out->value = p->value;
-    out->script_pub_key = p->spk;
+    out->value = p->value[po->n];
+    out->script_pub_key = p->spk[po->n];
     return true;
 }
 
-/* {coinbase, a Sapling v4 tx spending one P2PKH coin}, signed for `height`.
- * The Sapling signature hash reads the precomputed prevout, sequence and
- * output hashes, so it signs over exactly what precompute_tx_data supplies. */
-static bool vpd_signed_spend_block(struct block *b,
-                                   struct vpd_signed_prev *prev, int height,
-                                   bool corrupt)
+static bool vpd_v6_decode(struct transaction *tx, struct byte_stream *wire)
+{
+    transaction_free(tx);
+    transaction_init(tx);
+    struct byte_stream input;
+    stream_init_from_data(&input, wire->data, wire->size);
+    return transaction_v6_decode_prefix(tx, &input, wire->size) &&
+        input.read_pos == wire->size;
+}
+
+static bool vpd_v6_reencode(struct transaction *tx, uint32_t branch_id)
+{
+    struct byte_stream wire;
+    stream_init(&wire, 4096);
+    bool ok = stream_write_u32_le(&wire,
+                                  (uint32_t)IRONWOOD_TX_VERSION | (1u << 31)) &&
+        stream_write_u32_le(&wire, IRONWOOD_VERSION_GROUP_ID) &&
+        stream_write_u32_le(&wire, branch_id) &&
+        stream_write_u32_le(&wire, tx->lock_time) &&
+        stream_write_u32_le(&wire, tx->expiry_height) &&
+        stream_write_compact_size(&wire, tx->num_vin);
+    for (size_t i = 0; ok && i < tx->num_vin; i++)
+        ok = tx_in_serialize(&tx->vin[i], &wire);
+    ok = stream_write_compact_size(&wire, tx->num_vout) && ok;
+    for (size_t i = 0; ok && i < tx->num_vout; i++)
+        ok = tx_out_serialize(&tx->vout[i], &wire);
+    for (size_t i = 0; i < 4; i++)
+        ok = stream_write_compact_size(&wire, 0) && ok;
+    if (!ok) {
+        stream_free(&wire);
+        return false;
+    }
+    ok = vpd_v6_decode(tx, &wire);
+    stream_free(&wire);
+    return ok;
+}
+
+static bool vpd_signed_hash(const struct transaction *tx,
+                            const struct vpd_signed_prev *prev, size_t index,
+                            uint32_t branch_id, bool v6, struct uint256 *hash)
+{
+    struct sighash_type all = { .raw = SIGHASH_ALL };
+    if (!v6)
+        return signature_hash(&prev->spk[index], tx, (unsigned int)index, all,
+                              prev->value[index], branch_id, NULL, hash);
+    struct transaction_v6_prevout prevouts[2];
+    for (size_t i = 0; i < prev->count; i++) {
+        prevouts[i].amount = prev->value[i];
+        prevouts[i].script = prev->spk[i].data;
+        prevouts[i].script_size = prev->spk[i].size;
+    }
+    return transaction_v6_sighash(tx, prevouts, prev->count,
+                                  (unsigned int)index, all, &prev->spk[index],
+                                  prev->value[index], branch_id, hash);
+}
+
+static bool vpd_signed_script(struct tx_in *input, const struct privkey *key,
+                              const struct pubkey *pub,
+                              const struct uint256 *hash, bool corrupt)
+{
+    unsigned char sig[80];
+    size_t siglen = sizeof(sig);
+    if (!privkey_sign(key, hash, sig, &siglen) || siglen > 72)
+        return false;
+    if (corrupt)
+        sig[siglen - 4] ^= 0xFF;
+    sig[siglen++] = SIGHASH_ALL;
+    unsigned char ss[1 + 73 + 1 + 65];
+    size_t pklen = pub->size > 65 ? 65 : pub->size;
+    size_t n = 0;
+    ss[n++] = (unsigned char)siglen;
+    memcpy(&ss[n], sig, siglen);
+    n += siglen;
+    ss[n++] = (unsigned char)pklen;
+    memcpy(&ss[n], pub->vch, pklen);
+    n += pklen;
+    script_set(&input->script_sig, ss, n);
+    return true;
+}
+
+static bool vpd_signed_block(struct block *b, struct vpd_signed_prev *prev,
+                             int height, bool corrupt, bool v6)
 {
     struct privkey key;
     privkey_make_new(&key, true);
     struct pubkey pub;
     privkey_get_pubkey(&key, &pub);
     struct key_id kid = pubkey_get_id(&pub);
-    script_for_p2pkh(&prev->spk, &kid);
-    prev->value = 100000000;
+    prev->count = v6 ? 2 : 1;
+    for (size_t i = 0; i < prev->count; i++) {
+        script_for_p2pkh(&prev->spk[i], &kid);
+        prev->value[i] = 100000000 + (int64_t)i;
+    }
 
     block_init(b);
     b->vtx = zcl_calloc(2, sizeof(struct transaction), "vpd");
     if (!b->vtx)
         return false;
     b->num_vtx = 2;
-    int one[1] = {0};
+    int inputs[2] = {0, 1};
     struct transaction *tx = &b->vtx[1];
     if (!vpd_build_tx(&b->vtx[0], 0, true, NULL, 0, 0) ||
-        !vpd_build_tx(tx, 1, false, one, 1, 0))
+        !vpd_build_tx(tx, 1, false, inputs, (int)prev->count, 0))
         return false;
-    tx->overwintered = true;
-    tx->version = 4;
-    tx->version_group_id = SAPLING_VERSION_GROUP_ID;
-
     uint32_t branch_id = consensus_current_epoch_branch_id(
         height, &chain_params_get()->consensus);
-    struct sighash_type ht = { .raw = SIGHASH_ALL };
-    struct uint256 sighash;
-    if (!signature_hash(&prev->spk, tx, 0, ht, prev->value, branch_id, NULL,
-                        &sighash))
-        return false;
-    unsigned char sig[80];
-    size_t siglen = sizeof(sig);
-    if (!privkey_sign(&key, &sighash, sig, &siglen) || siglen > 72)
-        return false;
-    if (corrupt)
-        sig[siglen - 4] ^= 0xFF;    /* still a DER integer, wrong value */
-    sig[siglen++] = SIGHASH_ALL;
-
-    unsigned char ss[1 + 73 + 1 + 65];
-    size_t pklen = pub.size > 65 ? 65 : pub.size;
-    size_t n = 0;
-    ss[n++] = (unsigned char)siglen;
-    memcpy(&ss[n], sig, siglen);
-    n += siglen;
-    ss[n++] = (unsigned char)pklen;
-    memcpy(&ss[n], pub.vch, pklen);
-    n += pklen;
-    script_set(&tx->vin[0].script_sig, ss, n);
-    transaction_compute_hash(tx);
+    if (v6) {
+        if (!vpd_v6_reencode(tx, branch_id))
+            return false;
+    } else {
+        tx->overwintered = true;
+        tx->version = SAPLING_TX_VERSION;
+        tx->version_group_id = SAPLING_VERSION_GROUP_ID;
+    }
+    for (size_t i = 0; i < prev->count; i++) {
+        struct uint256 hash;
+        if (!vpd_signed_hash(tx, prev, i, branch_id, v6, &hash) ||
+            !vpd_signed_script(&tx->vin[i], &key, &pub, &hash,
+                               corrupt && i == 0))
+            return false;
+    }
+    if (!v6)
+        transaction_compute_hash(tx);
     return true;
+}
+
+static bool vpd_signed_spend_block(struct block *b,
+                                   struct vpd_signed_prev *prev, int height,
+                                   bool corrupt)
+{
+    return vpd_signed_block(b, prev, height, corrupt, false);
+}
+
+static bool vpd_signed_v6_block(struct block *b,
+                                struct vpd_signed_prev *prev, int height)
+{
+    return vpd_signed_block(b, prev, height, false, true);
+}
+
+static bool vpd_signed_v6_p2sh_block(struct block *b,
+                                     struct vpd_signed_prev *prev, int height,
+                                     struct script *redeem)
+{
+    struct privkey key;
+    privkey_make_new(&key, true);
+    struct pubkey pub;
+    privkey_get_pubkey(&key, &pub);
+    struct key_id kid = pubkey_get_id(&pub);
+    script_for_p2pkh(redeem, &kid);
+    struct script_id sid;
+    script_id_from_script(&sid, redeem);
+    script_for_p2sh(&prev->spk[0], &sid);
+    prev->value[0] = 100000000;
+    prev->count = 1;
+
+    block_init(b);
+    b->vtx = zcl_calloc(2, sizeof(struct transaction), "vpd");
+    if (!b->vtx)
+        return false;
+    b->num_vtx = 2;
+    int input[1] = {0};
+    struct transaction *tx = &b->vtx[1];
+    if (!vpd_build_tx(&b->vtx[0], 0, true, NULL, 0, 0) ||
+        !vpd_build_tx(tx, 1, false, input, 1, 0))
+        return false;
+    uint32_t branch_id = consensus_current_epoch_branch_id(
+        height, &chain_params_get()->consensus);
+    if (!vpd_v6_reencode(tx, branch_id))
+        return false;
+    struct uint256 hash;
+    return vpd_signed_hash(tx, prev, 0, branch_id, true, &hash) &&
+        vpd_signed_script(&tx->vin[0], &key, &pub, &hash, false) &&
+        script_push_data(&tx->vin[0].script_sig, redeem->data, redeem->size);
 }
 
 /* One script_verify_block call with `label` failing if given, under one
@@ -542,6 +663,92 @@ static void vpd_signed_run(const struct block *b, struct vpd_signed_prev *prev,
         *fired = zcl_alloc_fault_armed_label() == NULL;
     zcl_alloc_fault_clear();
     script_verify_set_parallel_min_inputs_for_test(-1);
+}
+
+static bool vpd_signed_summary_expected(const struct vpd_signed_prev *prev,
+                                        const struct script_verify_summary *s,
+                                        bool accepted)
+{
+    if (accepted)
+        return s->ok == 1 && !s->internal_error && s->tx_count == 2 &&
+            s->input_count == prev->count && s->inputs_verified == prev->count &&
+            s->inputs_failed == 0;
+    return s->ok == 0 && !s->internal_error && s->tx_count == 2 &&
+        s->input_count == 1 && s->inputs_verified == 0 &&
+        s->inputs_failed == 1 && s->first_failure_vin == 0 &&
+        s->first_failure_serror != SCRIPT_ERR_OK;
+}
+
+static bool vpd_signed_routes_match(const struct block *b,
+                                    struct vpd_signed_prev *prev, int height,
+                                    bool accepted)
+{
+    struct script_verify_summary serial;
+    for (int iter = 0; iter < 16; iter++) {
+        for (int routing = 0; routing < 3; routing++) {
+            struct script_verify_summary s;
+            vpd_signed_run(b, prev, height, routing, NULL, NULL, &s);
+            if (!vpd_signed_summary_expected(prev, &s, accepted))
+                return false;
+            if (routing == 0)
+                serial = s;
+            else if (!sv_eq(&s, &serial))
+                return false;
+        }
+    }
+    return true;
+}
+
+static int vpd_case_v6_full_prevouts(int height)
+{
+    int failures = 0;
+    struct block b;
+    struct vpd_signed_prev prev;
+    bool built = vpd_signed_v6_block(&b, &prev, height);
+    VPD_CHECK("v6 full prevouts: signed two-input fixture", built);
+    if (!built)
+        return failures;
+    VPD_CHECK("v6 full prevouts: serial, pool and threshold accept",
+              vpd_signed_routes_match(&b, &prev, height, true));
+    prev.value[1]++;
+    VPD_CHECK("v6 full prevouts: other amount mismatch rejects identically",
+              vpd_signed_routes_match(&b, &prev, height, false));
+    prev.value[1]--;
+    prev.spk[1].data[4] ^= 1;
+    VPD_CHECK("v6 full prevouts: other script mismatch rejects identically",
+              vpd_signed_routes_match(&b, &prev, height, false));
+    prev.spk[1].data[4] ^= 1;
+    vpd_block_free(&b);
+    return failures;
+}
+
+static int vpd_case_v6_p2sh(int height)
+{
+    int failures = 0;
+    struct block b;
+    struct vpd_signed_prev prev;
+    struct script redeem;
+    bool built = vpd_signed_v6_p2sh_block(&b, &prev, height, &redeem);
+    VPD_CHECK("v6 P2SH: signed redemption fixture", built);
+    VPD_CHECK("v6 P2SH: prevout scriptPubKey is not the P2PKH redeemScript",
+              script_is_p2sh(&prev.spk[0]) && prev.spk[0].size == 23 &&
+              !script_is_p2sh(&redeem) && redeem.size == 25);
+    if (!built) {
+        vpd_block_free(&b);
+        return failures;
+    }
+    VPD_CHECK("v6 P2SH: serial, pool and threshold accept redemption",
+              vpd_signed_routes_match(&b, &prev, height, true));
+    prev.value[0]++;
+    VPD_CHECK("v6 P2SH: amount mismatch rejects identically",
+              vpd_signed_routes_match(&b, &prev, height, false));
+    prev.value[0]--;
+    prev.spk[0].data[2] ^= 1;
+    VPD_CHECK("v6 P2SH: prevout script mismatch rejects identically",
+              vpd_signed_routes_match(&b, &prev, height, false));
+    prev.spk[0].data[2] ^= 1;
+    vpd_block_free(&b);
+    return failures;
 }
 
 /* precompute_tx_data hashes into streams it allocates. One that could not get
@@ -1384,6 +1591,12 @@ int test_validate_parallel_determinism(void)
     }
 
     failures += vpd_case_precompute_out_of_memory(
+        chain_params_get()->consensus.vUpgrades[UPGRADE_SAPLING]
+            .nActivationHeight + 1);
+    failures += vpd_case_v6_full_prevouts(
+        chain_params_get()->consensus.vUpgrades[UPGRADE_SAPLING]
+            .nActivationHeight + 1);
+    failures += vpd_case_v6_p2sh(
         chain_params_get()->consensus.vUpgrades[UPGRADE_SAPLING]
             .nActivationHeight + 1);
 

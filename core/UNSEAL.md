@@ -1362,3 +1362,23 @@ later lane flips it HARD.
 - 2026-11-28T09:58:49Z — REASON: testnet-only Ironwood pool-total conservation and reorg-safe storage
   old ROOT: ab9c424fe936630ceff36594c7b45843f56aa196a59d5d0a4933c435322396b8
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-28T11:56:40Z — REASON: testnet-only Ironwood full-prevout transparent checker validation
+  old ROOT: a2f9d458076e68cf61a23af31df38c63101cbf95e63466f6fd3504c53f4b75fe
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-28T12:47:04Z — REASON: testnet-only independent full-prevout checker rebase without pool-total candidate
+  old ROOT: ab9c424fe936630ceff36594c7b45843f56aa196a59d5d0a4933c435322396b8
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-28T12:59:20Z — REASON: testnet-only Ironwood P2SH prevout script sighash repair
+  old ROOT: efb6d5e895c757591454a997f83b3fbc04eb95741e6fac3559cd7323865edacb
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-28T13:14:08Z — REASON: testnet-only full-prevout checker integration onto current main
+  old ROOT: a2f9d458076e68cf61a23af31df38c63101cbf95e63466f6fd3504c53f4b75fe
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-28T13:19:56Z — REASON: testnet-only Ironwood remove one-input script-code prevout inference
+  old ROOT: 3642401d2156b53f659c06a7762dde3046d6f45ccb2811bd57fe8b05d1c11f64
+  by: owner unseal ritual (make core-unseal)
