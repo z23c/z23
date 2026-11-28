@@ -45,6 +45,7 @@ static int rf_mature_reward(struct rf_fixture *f)
     int rc = rf_rpc(f, send, raw, sizeof(raw));
     printf("immature reward reply (rc=%d): %s\n", rc, raw);
     RF_CHECK(rc != 0);
+    RF_CHECK(strstr(raw, "Insufficient funds"));
     RF_CHECK(rf_mine(f, 1, false));
     RF_CHECK(rf_height(f, 101));
     rc = rf_rpc(f, send, raw, sizeof(raw));

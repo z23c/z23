@@ -130,16 +130,20 @@ static bool rf_setup(struct rf_fixture *f)
     return true;
 }
 
-static bool rf_mine(struct rf_fixture *f, int count, bool vote)
+static bool rf_get_height(struct rf_fixture *f, int *height)
 {
-    char n[16], ballot[160], raw[RNF_RAW];
-    snprintf(n, sizeof(n), "%d", count);
-    snprintf(ballot, sizeof(ballot), "{\"catalog\":\"%s\",\"slots\":[0,1]}", rf_digest);
-    const char *const words[] = {"generatetoaddress", n, f->address, vote ? ballot : NULL, NULL};
-    if (rf_rpc(f, words, raw, sizeof(raw))) {
-        fprintf(stderr, "mine: %s\n", raw);
+    char raw[4096], *end;
+    const char *const words[] = {"getblockcount", NULL};
+    if (rf_rpc(f, words, raw, sizeof(raw))) return false;
+    long n = strtol(raw, &end, 10);
+    if (end == raw || n < 0 || n > INT_MAX || strspn(end, "\r\n") != strlen(end))
         return false;
-    }
+    *height = (int)n;
+    return true;
+}
+
+static bool rf_mine_reply(const char *raw, int count)
+{
     struct json_value result = {0};
     bool ok = json_read(&result, raw, strlen(raw)) && result.type == JSON_ARR &&
               json_size(&result) == (size_t)count;
@@ -147,11 +151,79 @@ static bool rf_mine(struct rf_fixture *f, int count, bool vote)
     return ok;
 }
 
+/* A timed-out client does not cancel the node's in-flight batch. Wait for
+ * that batch to finish instead of issuing overlapping work and overshooting. */
+static bool rf_mine_reconcile(struct rf_fixture *f, int *height, int end, const char *reply)
+{
+    long deadline = rnf_now_ms() + RNF_RECONCILE_MS;
+    while (*height < end && rnf_now_ms() < deadline) {
+        int current;
+        if (rf_get_height(f, &current)) {
+            if (current > end || current < *height) break;
+            if (current > *height) {
+                *height = current;
+                deadline = rnf_now_ms() + RNF_RECONCILE_MS;
+            }
+        }
+        if (*height < end) rnf_sleep_ms(200);
+    }
+    if (*height == end) return true;
+    fprintf(stderr, "mine: %s\n", reply);
+    return false;
+}
+
+static bool rf_mine_batch(struct rf_fixture *f, int *height, int target, bool vote,
+                          char *last_error, size_t error_cap)
+{
+    char n[16], ballot[160], raw[RNF_RAW] = {0};
+    int batch = target - *height < 10 ? target - *height : 10;
+    int batch_end = *height + batch;
+    snprintf(n, sizeof(n), "%d", batch);
+    snprintf(ballot, sizeof(ballot), "{\"catalog\":\"%s\",\"slots\":[0,1]}", rf_digest);
+    const char *const words[] = {"generatetoaddress", n, f->address, vote ? ballot : NULL, NULL};
+    long start = rnf_now_ms();
+    int rc = rf_rpc(f, words, raw, sizeof(raw));
+    printf("mine-call count=%d vote=%d rc=%d elapsed_ms=%ld\n",
+           batch, vote, rc, rnf_now_ms() - start);
+    if (!rc && !rf_mine_reply(raw, batch)) {
+        fprintf(stderr, "mine: unexpected successful reply: %s\n", raw);
+        return false;
+    }
+    if (rc) snprintf(last_error, error_cap, "%s", raw);
+    if (rc && (strstr(raw, "RESPONSE_TIMEOUT") || rc < 0))
+        return rf_mine_reconcile(f, height, batch_end, last_error);
+    int current;
+    if (!rf_get_height(f, &current))
+        return rf_mine_reconcile(f, height, batch_end, rc ? last_error : raw);
+    if (current > batch_end || current < *height || (!rc && current != batch_end))
+        return false;
+    *height = current;
+    return true;
+}
+
+static bool rf_mine(struct rf_fixture *f, int count, bool vote)
+{
+    char last_error[4096] = "";
+    int height;
+    if (count <= 0 || !rf_get_height(f, &height) || height > INT_MAX - count) return false;
+    int target = height + count;
+    long deadline = rnf_now_ms() + RNF_RECONCILE_MS;
+    while (height < target && rnf_now_ms() < deadline) {
+        int previous = height;
+        if (!rf_mine_batch(f, &height, target, vote, last_error, sizeof(last_error))) return false;
+        if (height > previous) deadline = rnf_now_ms() + RNF_RECONCILE_MS;
+        else rnf_sleep_ms(200);
+    }
+    int actual;
+    if (height == target && rf_get_height(f, &actual) && actual == target) return true;
+    fprintf(stderr, "mine: %s\n", last_error);
+    return false;
+}
+
 static bool rf_height(struct rf_fixture *f, int height)
 {
-    char raw[4096];
-    const char *const words[] = {"getblockcount", NULL};
-    return !rf_rpc(f, words, raw, sizeof(raw)) && atoi(raw) == height;
+    int actual;
+    return rf_get_height(f, &actual) && actual == height;
 }
 
 static bool rf_status(struct rf_fixture *f, int height, int votes, const char *phase)
