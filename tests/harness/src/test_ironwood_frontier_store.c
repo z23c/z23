@@ -40,6 +40,15 @@ static bool legacy_delete(void)
     if (sqlite3_close(db) != SQLITE_OK) ok = false;
     return ok;
 }
+static bool initial_progress(struct test_state *t)
+{
+    int64_t tip = 77, generation = 88;
+    if (!ironwood_checkpoint_progress(&t->session, &tip, &generation) || tip != -1 || generation != 0) return false;
+    tip = 77; generation = 88;
+    return !ironwood_checkpoint_progress(&t->session, NULL, &generation) &&
+        !ironwood_checkpoint_progress(&t->session, &tip, NULL) &&
+        !ironwood_checkpoint_progress(&t->session, &tip, &tip) && tip == 77 && generation == 88;
+}
 static bool init_history(struct test_state *t)
 {
     return anchor_kv_ensure_schema(t->db) && sql(t->db, "BEGIN") && ironwood_checkpoint_ensure_schema(t->db) &&
@@ -48,7 +57,7 @@ static bool init_history(struct test_state *t)
         ironwood_checkpoint_begin_replay(t->db, t->parent, t->empty) &&
         ironwood_checkpoint_probe(t->db) == IRONWOOD_CHECKPOINT_PRESENT &&
         ironwood_checkpoint_refresh(t->db, &t->session) &&
-        ironwood_checkpoint_refresh(t->db, &t->session) &&
+        ironwood_checkpoint_refresh(t->db, &t->session) && initial_progress(t) &&
         ironwood_checkpoint_find_root(&t->session, 0, t->empty, &t->out) == IRONWOOD_CHECKPOINT_MISSING && t->out.height == 99;
 }
 static bool add_history(struct test_state *t)
@@ -67,13 +76,24 @@ static bool legacy_after_init(struct test_state *t)
         scalar(t->db, "SELECT COUNT(*) FROM ironwood_checkpoints") == 4 &&
         sql(t->db, "INSERT INTO sapling_anchors(anchor,height,tree) VALUES(1,2,2)");
 }
+static bool rolled_back_progress(struct test_state *t)
+{
+    int64_t tip = 77, generation = 88;
+    return !ironwood_checkpoint_progress(&t->session, &tip, &generation) &&
+        tip == 77 && generation == 88 &&
+        ironwood_checkpoint_latest_before(&t->session, 3, &t->out) == IRONWOOD_CHECKPOINT_INCOMPLETE &&
+        ironwood_checkpoint_refresh(t->db, &t->session) &&
+        ironwood_checkpoint_progress(&t->session, &tip, &generation) && tip == 2 && generation == 3;
+}
 static bool rollback_append(struct test_state *t)
 {
-    return sql(t->db, "BEGIN") &&
-        ironwood_checkpoint_append(&t->session, 3, t->h3, t->h2, t->root, 2, NULL, 0) &&
-        sql(t->db, "ROLLBACK") && sql(t->db, "BEGIN") &&
-        ironwood_checkpoint_latest_before(&t->session, 3, &t->out) == IRONWOOD_CHECKPOINT_INCOMPLETE &&
-        ironwood_checkpoint_refresh(t->db, &t->session);
+    int64_t tip = 77, generation = 88;
+    if (ironwood_checkpoint_progress(&t->session, &tip, &generation) || tip != 77 || generation != 88) return false;
+    if (!sql(t->db, "BEGIN") || !ironwood_checkpoint_progress(&t->session, &tip, &generation) || tip != 2 || generation != 3 ||
+        !ironwood_checkpoint_append(&t->session, 3, t->h3, t->h2, t->root, 2, NULL, 0) ||
+        !ironwood_checkpoint_progress(&t->session, &tip, &generation) || tip != 3 || generation != 4 ||
+        !sql(t->db, "ROLLBACK") || !sql(t->db, "BEGIN")) return false;
+    return rolled_back_progress(t);
 }
 static bool rollback_reorg(struct test_state *t)
 {

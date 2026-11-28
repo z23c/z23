@@ -8,6 +8,8 @@
 #include "jobs/created_outputs_index.h"
 #include "jobs/utxo_apply_history_hold.h"
 #include "jobs/utxo_apply_stage.h"
+#include "jobs/utxo_apply_turnstile_seed.h"
+#include "jobs/utxo_apply_ironwood_bootstrap.h"
 #include "jobs/utxo_apply_ironwood_session.h"
 #include "jobs/utxo_apply_delta.h"
 #include "jobs/replay_count_only.h"
@@ -1088,6 +1090,8 @@ static bool utxo_apply_stage_init_locked(sqlite3 *db, struct main_state *ms)
 bool utxo_apply_stage_init(struct main_state *ms)
 {
     if (!ms) LOG_FAIL("utxo_apply", "init: NULL main_state");
+    utxo_apply_turnstile_seed_shutdown();
+    utxo_ironwood_bootstrap_shutdown();
 
     sqlite3 *db = progress_store_db();
     if (!db) LOG_FAIL("utxo_apply", "init: progress_store not open");
@@ -1238,14 +1242,18 @@ void utxo_apply_stage_shutdown(void)
                  (int64_t)UA_SELECT_IDLE_NONE);
     utxo_apply_observe_reset();
     pthread_mutex_unlock(&g_lock);
+    utxo_apply_turnstile_seed_shutdown();
+    utxo_ironwood_bootstrap_shutdown();
 }
 
 void utxo_apply_stage_set_reader(utxo_apply_reader_fn fn, void *user)
 {
+    utxo_ironwood_bootstrap_context_change_begin();
     pthread_mutex_lock(&g_lock);
     g_reader = fn;
     g_reader_user = user;
     pthread_mutex_unlock(&g_lock);
+    utxo_ironwood_bootstrap_context_change_end();
 }
 
 void utxo_apply_stage_set_lookup(utxo_apply_lookup_fn fn, void *user)

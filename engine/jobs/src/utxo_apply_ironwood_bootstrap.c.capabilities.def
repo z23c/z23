@@ -1,0 +1,2 @@
+/* purpose: Declare filesystem capabilities for private frontier recovery. */
+ZCL_MODULE_CAPABILITY("engine/jobs/src/utxo_apply_ironwood_bootstrap.c", CAP_FS_READ|CAP_FS_WRITE, "Reads authenticated block history and commits recovery checkpoints.")

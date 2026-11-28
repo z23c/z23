@@ -1,15 +1,26 @@
 /* purpose: Check the private reducer's durable frontier against canonical replay. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "jobs/utxo_apply_ironwood_session.h"
+#include "jobs/utxo_apply_ironwood_bootstrap.h"
+#include "utxo_apply_ironwood_bootstrap_internal.h"
+#include "storage/progress_store.h"
 #include "base/safe_alloc.h"
 #include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "primitives/block.h"
 #include "core/serialize.h"
+#include "storage/repair_marker.h"
 #include "services/ironwood_resident_params.h"
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+
+static _Atomic bool bootstrap_requested;
+bool utxo_ironwood_session_bootstrap_requested(void)
+{ return atomic_load(&bootstrap_requested); }
+void utxo_ironwood_session_bootstrap_clear(void)
+{ atomic_store(&bootstrap_requested, false); }
 
 static struct ironwood_checkpoint_session store;
 static struct ironwood_history_cursor replay;
@@ -25,6 +36,7 @@ static void end_replay(void)
 
 void utxo_ironwood_session_reset(void)
 {
+    utxo_ironwood_session_bootstrap_clear();
     end_replay();
     store = (struct ironwood_checkpoint_session){0};
     verified = (struct ironwood_history_event){0};
@@ -72,8 +84,10 @@ static bool empty_root(uint8_t root[32])
 
 static enum utxo_ironwood_result seed_store(struct sqlite3 *db, const struct block_index *bi)
 {
-    if (!genesis_matches(bi) && !(bi->nHeight == 1 && genesis_matches(bi->pprev)))
+    if (!genesis_matches(bi) && !(bi->nHeight == 1 && genesis_matches(bi->pprev))) {
+        atomic_store(&bootstrap_requested, true);
         return UTXO_IRONWOOD_HISTORY_INCOMPLETE;
+    }
     uint8_t root[32], zero[32] = {0};
     if (!empty_root(root) || !ironwood_checkpoint_begin_replay(db, zero, root))
         return UTXO_IRONWOOD_LOCAL_ERROR;
@@ -84,8 +98,25 @@ static enum utxo_ironwood_result seed_store(struct sqlite3 *db, const struct blo
     return UTXO_IRONWOOD_OK;
 }
 
+static const uint8_t bootstrap_marker_key[32] = {0};
+
+static bool bootstrap_is_pending(struct sqlite3 *db, bool *pending)
+{
+    size_t payload_len = 0;
+    return repair_marker_table_ensure(db) &&
+        repair_marker_have(db, IRONWOOD_BOOTSTRAP_MARKER, 0, bootstrap_marker_key,
+                           pending, NULL, 0, &payload_len);
+}
+
 static enum utxo_ironwood_result open_store(struct sqlite3 *db, const struct block_index *bi)
 {
+    bool pending = false;
+    if (!db || sqlite3_get_autocommit(db) || !bootstrap_is_pending(db, &pending))
+        return UTXO_IRONWOOD_LOCAL_ERROR;
+    if (pending) {
+        atomic_store(&bootstrap_requested, true);
+        return UTXO_IRONWOOD_HISTORY_INCOMPLETE;
+    }
     if (store.audited && store.db == db) {
         int64_t generation = store.generation;
         if (ironwood_checkpoint_refresh(db, &store)) {
@@ -147,6 +178,20 @@ static enum utxo_ironwood_result resume_replay(const struct block_index *parent,
     return UTXO_IRONWOOD_OK;
 }
 
+static bool bootstrap_snapshot_matches(struct ironwood_checkpoint_session *snapshot,
+    const struct ironwood_history_event *event, const struct ironwood_note_frontier *frontier)
+{
+    int64_t tip, generation; struct ironwood_checkpoint row;
+    uint8_t bytes[IRONWOOD_FRONTIER_STORAGE_MAX]; size_t size = 0;
+    return ironwood_checkpoint_progress(snapshot, &tip, &generation) &&
+        tip == event->height && generation == snapshot->generation &&
+        ironwood_checkpoint_latest_before(snapshot, tip + 1, &row) == IRONWOOD_CHECKPOINT_FOUND &&
+        row.count == event->count && !memcmp(row.root, event->root, 32) &&
+        !memcmp(row.block_hash, event->block_hash.data, 32) &&
+        ironwood_frontier_encode(frontier, bytes, sizeof bytes, &size).ok &&
+        row.payload_size == size && !memcmp(row.payload, bytes, size);
+}
+
 static enum utxo_ironwood_result recover_parent(const struct block_index *parent,
     ironwood_history_reader_fn reader, const char *datadir, void *user)
 {
@@ -154,6 +199,14 @@ static enum utxo_ironwood_result recover_parent(const struct block_index *parent
     if (verified.available && verified.height == parent->nHeight &&
         uint256_eq(&verified.block_hash, parent->phashBlock) && matches_row(&verified))
         return UTXO_IRONWOOD_OK;
+    struct ironwood_history_event completed = {0};
+    struct ironwood_note_frontier frontier = {0};
+    struct ironwood_checkpoint_session snapshot = {0};
+    if (utxo_ironwood_bootstrap_completed(store.db, progress_store_epoch(), parent,
+            &completed, &frontier, &snapshot) &&
+        bootstrap_snapshot_matches(&snapshot, &completed, &frontier)) {
+        store = snapshot; verified = completed; end_replay(); return UTXO_IRONWOOD_OK;
+    }
     if (!slots || replay.parent != parent || !uint256_eq(&replay.parent_hash, parent->phashBlock)) {
         if (!start_replay(parent)) return UTXO_IRONWOOD_LOCAL_ERROR;
     }

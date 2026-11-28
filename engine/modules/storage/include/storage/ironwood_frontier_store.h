@@ -52,6 +52,12 @@ bool ironwood_checkpoint_audit(struct sqlite3 *db,
 /* Reuse a current audited session; otherwise perform the streaming audit. */
 bool ironwood_checkpoint_refresh(struct sqlite3 *db,
     struct ironwood_checkpoint_session *session);
+/* Read the tip and generation from a current audited session inside its
+ * caller-owned transaction. Outputs must be distinct and separate from the
+ * session; both are unchanged on failure. This is local progress metadata,
+ * not authentication of the stored chain or its frontier. */
+bool ironwood_checkpoint_progress(struct ironwood_checkpoint_session *session,
+    int64_t *tip_out, int64_t *generation_out);
 /* Append every canonical height in order. A NULL payload is permitted only
  * when root and count match the previous checkpoint. Parent identity must
  * match the immediately preceding block. */

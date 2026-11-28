@@ -7,6 +7,8 @@
 
 /* Serialized by the stage lock. Reset at both ends of each database lifetime. */
 void utxo_ironwood_session_reset(void);
+bool utxo_ironwood_session_bootstrap_requested(void);
+void utxo_ironwood_session_bootstrap_clear(void);
 enum utxo_ironwood_result utxo_ironwood_session_prepare(struct sqlite3 *db,
     const struct block_index *bi, const struct block *block,
     ironwood_history_reader_fn reader, const char *datadir, void *user,

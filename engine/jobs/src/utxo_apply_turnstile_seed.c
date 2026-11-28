@@ -13,9 +13,11 @@
 #include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "core/uint256.h"
+#include "base/safe_alloc.h"
 #include "jobs/catchup_cadence.h"
 #include "jobs/stage_helpers.h"
 #include "jobs/utxo_apply_turnstile.h"
+#include "jobs/utxo_apply_ironwood_history.h"
 #include "primitives/block.h"
 #include "platform/time_compat.h"
 #include "storage/disk_block_io.h"
@@ -29,6 +31,9 @@
 #include "validation/main_state.h"
 
 #include <sqlite3.h>
+#include <limits.h>
+#include <pthread.h>
+#include <stdlib.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -55,7 +60,7 @@ static _Atomic int g_hold = 0;   /* 0 none, 1 body, 2 negative_total */
 static _Atomic bool g_halted = false;
 /* g_rows is one static slice buffer; block intake and the reducer kick can
  * both reach the drain hook, so one seeder runs and the other skips. */
-static atomic_flag g_busy = ATOMIC_FLAG_INIT;
+static pthread_mutex_t g_busy = PTHREAD_MUTEX_INITIALIZER;
 static void (*g_gap_hook)(void *) = NULL;
 static void *g_gap_user = NULL;
 
@@ -286,6 +291,179 @@ static int seed_commit(sqlite3 *db, struct main_state *ms, int64_t k,
     return store_ok ? wrote : 0;
 }
 
+/* Replayed progress is deliberately process-local: after restart or a branch
+ * change, authenticate the complete prefix again before trusting any row. */
+struct seed_replay {
+    sqlite3 *db;
+    struct main_state *ms;
+    const struct block_index **slots;
+    struct ironwood_history_cursor cursor;
+    int64_t max_height;
+    int64_t total;
+};
+static struct seed_replay g_replay;
+
+static void seed_replay_reset(void)
+{
+    free(g_replay.slots);
+    memset(&g_replay, 0, sizeof g_replay);
+}
+
+/* Only the private migration pays for this partial index. The schema copy
+ * path preserves explicit indexes for this non-fingerprinted table. */
+static bool seed_private_index(sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_schema WHERE type='index' AND name='shielded_pool_ironwood_unknown' AND tbl_name='shielded_pool_totals'", -1, &s, NULL) != SQLITE_OK)
+        return false;
+    int rc = sqlite3_step(s); // raw-sql-ok:progress-kv-kernel-store
+    sqlite3_finalize(s);
+    if (rc == SQLITE_ROW) return true;
+    if (rc != SQLITE_DONE) return false;
+    progress_store_tx_lock();
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+        progress_store_tx_unlock();
+        return false;
+    }
+    bool ok = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS shielded_pool_ironwood_unknown ON shielded_pool_totals(height) WHERE ironwood IS NULL", NULL, NULL, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    if (!ok) (void)sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    progress_store_tx_unlock();
+    return ok;
+}
+
+static bool seed_unknown_exists(sqlite3 *db, bool *unknown)
+{
+    sqlite3_stmt *s = NULL;
+    *unknown = false;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM shielded_pool_totals WHERE ironwood IS NULL LIMIT 1",
+                           -1, &s, NULL) != SQLITE_OK) {
+        LOG_WARN(STAGE_NAME, "pool unknown query prepare failed: %s", sqlite3_errmsg(db));
+        return false; // raw-return-ok: SQL failure logged above
+    }
+    int rc = sqlite3_step(s); // raw-sql-ok:progress-kv-kernel-store
+    *unknown = rc == SQLITE_ROW;
+    sqlite3_finalize(s);
+    return rc == SQLITE_ROW || rc == SQLITE_DONE;
+}
+
+static bool seed_replay_parent_active(struct main_state *ms)
+{
+    int height = g_replay.cursor.parent_height;
+    struct block_index *bi = active_chain_at(&ms->chain_active, height);
+    return bi && bi == g_replay.cursor.parent && bi->phashBlock &&
+        uint256_eq(bi->phashBlock, &g_replay.cursor.parent_hash);
+}
+
+static bool seed_replay_start(sqlite3 *db, struct main_state *ms, int64_t max_height)
+{
+    if (max_height < 0 || max_height > INT_MAX ||
+        (uint64_t)max_height + 1 > SIZE_MAX / sizeof *g_replay.slots) return false;
+    struct block_index *parent = active_chain_at(&ms->chain_active, (int)max_height);
+    if (!parent) return false;
+    size_t count = (size_t)max_height + 1;
+    g_replay.slots = zcl_calloc(count, sizeof *g_replay.slots, "Ironwood pool replay ancestry");
+    if (!g_replay.slots) return false;
+    if (!utxo_ironwood_history_begin(parent, g_replay.slots, count, &g_replay.cursor).ok) {
+        seed_replay_reset();
+        return false;
+    }
+    g_replay.db = db;
+    g_replay.ms = ms;
+    g_replay.max_height = max_height;
+    return true;
+}
+
+static bool seed_replay_row_valid(sqlite3 *db, struct main_state *ms,
+    const struct ironwood_history_event *event, int64_t total)
+{
+    int64_t cursor = (int64_t)stage_cursor_persisted(db, STAGE_NAME, STAGE_NAME);
+    int64_t max = -1, old = 0;
+    bool have_max = false, found = false, known = false;
+    struct block_index *bi = active_chain_at(&ms->chain_active, event->height);
+    return event->height < cursor && seed_replay_parent_active(ms) && bi && bi->phashBlock &&
+        uint256_eq(bi->phashBlock, &event->block_hash) &&
+        shielded_pool_kv_max_height(db, &max, &have_max) && have_max && max == g_replay.max_height &&
+        shielded_pool_kv_get_ironwood(db, event->height, &old, &known, &found) && found &&
+        (!known || old == total) && shielded_pool_kv_put_ironwood(db, event->height, total);
+}
+
+static bool seed_replay_commit(sqlite3 *db, struct main_state *ms,
+    const struct ironwood_history_event *event, int64_t total)
+{
+    progress_store_tx_lock();
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+        progress_store_tx_unlock();
+        return false;
+    }
+    bool ok = seed_replay_row_valid(db, ms, event, total);
+    if (ok) ok = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    if (!ok) (void)sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    progress_store_tx_unlock();
+    return ok;
+}
+
+static bool seed_replay_event(sqlite3 *db, struct main_state *ms,
+                              const struct ironwood_history_event *event)
+{
+    struct utxo_apply_turnstile_pool old = {g_replay.total, true}, total;
+    if (utxo_apply_turnstile_ironwood_check(old, event->ironwood_delta, &total) ||
+        !total.known) return false;
+    if (g_gap_hook) g_gap_hook(g_gap_user);
+    if (!seed_replay_commit(db, ms, event, total.total)) return false;
+    g_replay.total = total.total;
+    return true;
+}
+
+static bool seed_replay_resume(sqlite3 *db, struct main_state *ms, const char *datadir,
+                               utxo_apply_turnstile_seed_reader_fn reader, void *user)
+{
+    int64_t started = platform_time_monotonic_us();
+    bool wrote = false;
+    for (unsigned steps = 0; steps < UA_TURNSTILE_SEED_MAX_ROWS; ++steps) {
+        if (platform_time_monotonic_us() - started > UA_TURNSTILE_SEED_READ_BUDGET_US) break;
+        struct ironwood_history_cursor next;
+        struct ironwood_history_event event;
+        struct zcl_result r = utxo_ironwood_history_step(&g_replay.cursor, reader, datadir, user, &next, &event);
+        if (!r.ok) break;
+        if (event.available) {
+            if (!seed_replay_event(db, ms, &event)) break;
+            wrote = true;
+        }
+        g_replay.cursor = next;
+        if (next.complete) { seed_replay_reset(); break; }
+    }
+    return wrote;
+}
+
+/* A true handled result keeps unknown history out of the normal MAX seeder. */
+static bool seed_replay_once(sqlite3 *db, struct main_state *ms, const char *datadir,
+                             utxo_apply_turnstile_seed_reader_fn reader, void *user,
+                             int64_t max_height, bool *handled)
+{
+    *handled = false;
+    const struct chain_research_descriptor *profile = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    if (!profile || !profile->chain || chain_research_profile_current() != profile || chain_params_get() != profile->chain) {
+        seed_replay_reset();
+        return false;
+    }
+    if (g_replay.slots && (g_replay.db != db || g_replay.ms != ms ||
+        g_replay.max_height != max_height || !seed_replay_parent_active(ms))) seed_replay_reset();
+    if (!g_replay.slots) {
+        if (!seed_private_index(db)) { *handled = true; return false; }
+        bool unknown = false;
+        if (!seed_unknown_exists(db, &unknown)) {
+            *handled = true;
+            return false; // raw-return-ok: query error was logged
+        }
+        if (!unknown) return false;
+        *handled = true;
+        if (!seed_replay_start(db, ms, max_height)) return false;
+    }
+    *handled = true;
+    return seed_replay_resume(db, ms, datadir, reader, user);
+}
+
 /* The running totals live in the table; g_rows holds per-block values. */
 static void seed_log_reached(sqlite3 *db, int64_t through)
 {
@@ -310,6 +488,11 @@ static bool seed_run_once(sqlite3 *db, struct main_state *ms,
     if (!shielded_pool_kv_max_height(db, &k, &k_found)) {
         LOG_WARN(STAGE_NAME, "[utxo_apply] turnstile seed: MAX(height) read failed");
         return false;
+    }
+    if (k_found) {
+        bool handled = false;
+        bool progressed = seed_replay_once(db, ms, datadir, reader, reader_user, k, &handled);
+        if (handled) return progressed;
     }
     int64_t limit = cursor - 1;
     if (limit > k + UA_TURNSTILE_SEED_MAX_ROWS)
@@ -339,14 +522,14 @@ bool utxo_apply_turnstile_seed_run(
 {
     if (!db || !ms || atomic_load(&g_halted))
         return false;
-    if (atomic_flag_test_and_set(&g_busy))
+    if (pthread_mutex_trylock(&g_busy) != 0)
         return false;
     bool ran = seed_run_once(db, ms, datadir, reader, reader_user);
-    atomic_flag_clear(&g_busy);
+    pthread_mutex_unlock(&g_busy);
     return ran;
 }
 
-bool utxo_apply_turnstile_seed_post_commit(void)
+static bool seed_post_commit_locked(void)
 {
     struct main_state *ms = NULL;
     char datadir[2048];
@@ -359,7 +542,15 @@ bool utxo_apply_turnstile_seed_post_commit(void)
         return false;
     if (catchup_cadence_active() || reducer_drive_active())
         return false;
-    return utxo_apply_turnstile_seed_run(db, ms, datadir, reader, user);
+    return !atomic_load(&g_halted) && seed_run_once(db, ms, datadir, reader, user);
+}
+
+bool utxo_apply_turnstile_seed_post_commit(void)
+{
+    if (pthread_mutex_trylock(&g_busy) != 0) return false;
+    bool ran = seed_post_commit_locked();
+    pthread_mutex_unlock(&g_busy);
+    return ran;
 }
 
 void utxo_apply_turnstile_seed_stats_get(
@@ -380,8 +571,16 @@ void utxo_apply_turnstile_seed_set_gap_hook_for_test(void (*fn)(void *),
     g_gap_user = user;
 }
 
+void utxo_apply_turnstile_seed_shutdown(void)
+{
+    pthread_mutex_lock(&g_busy);
+    seed_replay_reset();
+    pthread_mutex_unlock(&g_busy);
+}
+
 void utxo_apply_turnstile_seed_reset_for_test(void)
 {
+    utxo_apply_turnstile_seed_shutdown();
     atomic_store(&g_through, -1);
     atomic_store(&g_rows_written, 0);
     atomic_store(&g_slices, 0);
@@ -389,7 +588,6 @@ void utxo_apply_turnstile_seed_reset_for_test(void)
     atomic_store(&g_read_us, 0);
     atomic_store(&g_hold, 0);
     atomic_store(&g_halted, false);
-    atomic_flag_clear(&g_busy);
     blocker_clear(SEED_BODY_BLOCKER);
     blocker_clear(SEED_NEG_BLOCKER);
     g_gap_hook = NULL;

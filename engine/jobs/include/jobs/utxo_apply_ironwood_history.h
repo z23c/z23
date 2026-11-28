@@ -35,6 +35,7 @@ struct ironwood_history_event {
     int height;
     struct uint256 block_hash;
     uint64_t count;
+    int64_t ironwood_delta; /* Authenticated raw-wire pool change for this block. */
     uint8_t root[32];
 };
 
@@ -46,4 +47,12 @@ struct zcl_result utxo_ironwood_history_begin(const struct block_index *parent,
 struct zcl_result utxo_ironwood_history_step(const struct ironwood_history_cursor *in,
     ironwood_history_reader_fn reader, const char *datadir, void *user,
     struct ironwood_history_cursor *out, struct ironwood_history_event *event);
+/* One bounded, hash-linked body step along the pinned parent branch. Inputs
+ * and outputs must not overlap; outputs stay unchanged on failure. */
+struct zcl_result utxo_ironwood_history_indexed_step(
+    const struct block_index *parent, int height, const struct uint256 *previous,
+    const struct ironwood_note_frontier *frontier, const uint8_t root[32],
+    ironwood_history_reader_fn reader, const char *datadir, void *user,
+    struct ironwood_note_frontier *out_frontier, uint8_t out_root[32],
+    struct ironwood_history_event *out_event);
 #endif

@@ -218,6 +218,17 @@ bool ironwood_checkpoint_refresh(struct sqlite3 *db, struct ironwood_checkpoint_
     return ironwood_checkpoint_audit(db, session);
 }
 
+bool ironwood_checkpoint_progress(struct ironwood_checkpoint_session *session,
+    int64_t *tip_out, int64_t *generation_out)
+{
+    int64_t tip;
+    if (!tip_out || !generation_out || tip_out == generation_out || !valid_session(session, &tip))
+        return false;
+    *tip_out = tip;
+    *generation_out = session->generation;
+    return true;
+}
+
 static bool update_tip(sqlite3 *db, int64_t old_generation, int64_t tip)
 {
     sqlite3_stmt *s = NULL;

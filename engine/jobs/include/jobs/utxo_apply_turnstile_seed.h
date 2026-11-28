@@ -53,6 +53,9 @@ bool utxo_apply_turnstile_seed_post_commit(void);
 void utxo_apply_turnstile_seed_stats_get(
     struct utxo_apply_turnstile_seed_stats *out);
 
+/* Reset transient replay before its stage or database is destroyed. */
+void utxo_apply_turnstile_seed_shutdown(void);
+
 /* Test seams: a callback between Phase A and Phase B, and a state reset. */
 void utxo_apply_turnstile_seed_set_gap_hook_for_test(void (*fn)(void *),
                                                      void *user);

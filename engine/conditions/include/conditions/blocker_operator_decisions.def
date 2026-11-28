@@ -56,6 +56,11 @@
 /* ── Optional shielded proving capability (engine/composition/src/boot_params_gate.c).
  * Consensus validation remains armed from embedded verifying keys; only
  * transaction creation requiring the large proving parameters is absent. */
+ZCL_BLOCKER_DECISION(utxo_apply.ironwood_bootstrap,
+    "Inspect the private checkpoint and authenticated historical body evidence. "
+    "Repair the underlying local fault using a verified copy or leave recovery "
+    "held; rebuilding history costs time, while accepting inconsistent state "
+    "could advance the node on an unauthenticated frontier.")
 ZCL_BLOCKER_DECISION(utxo_apply.value_overflow_owner_gate,
     "utxo_apply holds at a value_overflow hole because the only repair "
     "rewinds the coin frontier to re-apply that block, and that rewind "
