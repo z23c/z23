@@ -199,18 +199,24 @@ static bool check_reward_signatures(const struct v6_wire_view *v, const uint8_t 
         !ironwood_binding_auth_verify(cv, 2, balance, v->ironwood.binding_signature.data, changed).ok;
 }
 
+static bool check_reward_outpoint(const struct v6_wire_view *v)
+{
+    uint8_t txid[32]; struct v6_wire_cursor cursor; struct v6_span input;
+    return zcl_hex_decode("e46d7568c0973fff0d0bb1daaf9fcb4ff98e2f91d2e253e9e40d772d5a5223b9", txid, 32) &&
+        v6_core_cursor_init(v, true, &cursor) && v6_core_cursor_next(&cursor, &input) &&
+        input.size >= 36 && !memcmp(input.data, txid, 32) && zcl_read_u32_le(input.data + 32) == 0;
+}
+
 static bool check_reward_wire(const uint8_t *wire, size_t size)
 {
-    uint8_t script[25], want[32], hash[32], txid[32];
-    struct v6_wire_view v; struct v6_wire_cursor cursor; struct v6_span input;
+    uint8_t script[25], want[32], hash[32];
+    struct v6_wire_view v;
     if (!zcl_hex_decode("76a91479b000887626b294a914501a4cd226b58b23598388ac", script, 25) ||
         !zcl_hex_decode("96774c04a6bc5fa0fccd5cefe8b8b906a930b7044adbfb110ff41aee807ed301", want, 32) ||
-        !zcl_hex_decode("e46d7568c0973fff0d0bb1daaf9fcb4ff98e2f91d2e253e9e40d772d5a5223b9", txid, 32) ||
         v6_core_parse(wire, size, &v) != V6_WIRE_OK || v.inputs != 1 || v.outputs != 0 ||
         v.ironwood.count != 2 || v.ironwood.value_balance.size != 8 ||
         v.ironwood.binding_signature.size != 64) return false;
-    if (!v6_core_cursor_init(&v, true, &cursor) || !v6_core_cursor_next(&cursor, &input) ||
-        input.size < 36 || memcmp(input.data, txid, 32) || zcl_read_u32_le(input.data + 32) != 0) return false;
+    if (!check_reward_outpoint(&v)) return false;
     const struct v6_prevout prev = {1250000000, {script, sizeof script}};
     return v6_shielded_sighash(&v, &prev, 1, hash) && !memcmp(hash, want, 32) &&
         check_reward_signatures(&v, hash);
