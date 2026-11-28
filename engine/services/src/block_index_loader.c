@@ -2,8 +2,10 @@
  *
  * Block Index Loader: read the block_index.bin flat file and the LevelDB
  * block tree. The flat writer lives in block_index_flat_save.c, the SQLite
- * cache in block_index_sqlite_cache.c, and the post-load pointer-graph
- * derivation plus header-frontier promotion in block_index_post_load.c. */
+ * cache in block_index_sqlite_cache.c, the post-load pointer-graph
+ * derivation plus header-frontier promotion in block_index_post_load.c, and
+ * the history archive's header-ancestry walk in
+ * block_index_history_ancestry.c. */
 // one-result-type-ok:height-sorted-predicate — block_index_ptrs_height_sorted
 // is a pure total classification (already height-sorted, or not) over a
 // caller-owned array; it never fails, so zcl_result would only relabel
@@ -24,6 +26,7 @@
 #include "storage/blocks_mmap_reader.h"
 #include "core/serialize.h"
 #include "block_index_flat_internal.h"
+#include "block_index_history_ancestry.h"
 #include "services/block_index_flat_anchor.h"
 #include "services/block_row_verify.h"
 #include "services/block_index_integrity.h"
@@ -1349,85 +1352,6 @@ struct zcl_result load_block_index_with_genesis(struct main_state *ms,
     free(sorted);
     return ZCL_OK;
 }
-static bool bha_header(struct blocks_mmap *reader, const struct block_index *row,
-                       struct block_header *header)
-{
-    size_t len = 0;
-    if (!row || !row->phashBlock || row->nFile < 0) return false;
-    const uint8_t *payload = bmr_get_payload(reader, row->nFile, row->nDataPos, &len);
-    if (!payload) return false;
-    struct byte_stream stream;
-    stream_init_from_data(&stream, payload, len);
-    block_header_init(header);
-    if (!block_header_deserialize(header, &stream)) return false;
-    struct uint256 hash;
-    block_header_get_hash(header, &hash);
-    return uint256_eq(&hash, row->phashBlock) && header->nVersion == row->nVersion &&
-        header->nTime == row->nTime && header->nBits == row->nBits &&
-        uint256_eq(&header->hashFinalSaplingRoot, &row->hashFinalSaplingRoot);
-}
-
-static bool bha_row_valid(struct main_state *state, struct blocks_mmap *reader,
-                          struct block_index *row, int32_t height, struct block_header *header)
-{
-    return row && row->nHeight == height && row->phashBlock &&
-        block_map_find(&state->map_block_index, row->phashBlock) == row && bha_header(reader, row, header);
-}
-
-static bool bha_link_valid(const struct block_index *row, const struct block_header *header,
-                           int32_t height, const struct uint256 *genesis)
-{
-    if (height == 0)
-        return !row->pprev && uint256_eq(row->phashBlock, genesis) && uint256_is_null(&header->hashPrevBlock);
-    return row->pprev && row->pprev->phashBlock &&
-        uint256_eq(&header->hashPrevBlock, row->pprev->phashBlock);
-}
-
-#ifdef ZCL_TESTING
-static int32_t g_bha_cancel_height = -1;
-void block_index_history_test_cancel_height(int32_t height);
-void block_index_history_test_cancel_height(int32_t height)
-{
-    g_bha_cancel_height = height;
-}
-#endif
-
-static bool bha_cancelled(int32_t height)
-{
-#ifdef ZCL_TESTING
-    if (height == g_bha_cancel_height) return true;
-#else
-    (void)height;
-#endif
-    return thread_registry_shutdown_requested();
-}
-
-static bool bha_chain(struct main_state *state, struct blocks_mmap *reader,
-                      struct block_index *tip, int32_t height, const struct uint256 *genesis,
-                      struct block_header *top_window, bool *cancelled)
-{
-    struct block_index *row = tip;
-    for (int32_t h = height; h >= 0; h--) {
-        if (bha_cancelled(h)) { *cancelled = true; return false; }
-        struct block_header header;
-        if (!bha_row_valid(state, reader, row, h, &header) ||
-            !bha_link_valid(row, &header, h, genesis)) {
-            LOG_WARN("block_index_flat", "history archive header or ancestry invalid at height %d", (int)h);
-            return false;
-        }
-        if (height - h < ISLAND_ANCHOR_WINDOW) {
-            if (!block_index_set_hdrext(row, &header.hashMerkleRoot, &header.nNonce,
-                                        header.nSolution, header.nSolutionSize)) {
-                LOG_WARN("block_index_flat", "history archive header extension failed at height %d", (int)h);
-                return false;
-            }
-            if (top_window) top_window[height - h] = header;
-        }
-        if (h == 0) return true;
-        row = row->pprev;
-    }
-    return false;
-}
 
 static bool bha_input_valid(const struct main_state *state, const char *dir, size_t max_entries,
                             int32_t height, const uint8_t *hash, const struct uint256 *genesis,
@@ -1449,7 +1373,8 @@ static struct zcl_result bha_open(struct main_state *state,
         return ZCL_ERR(-1, "history archive: invalid input or nonempty state");
     struct zcl_result loaded = load_block_index_flat_archive(archive_dir, state, max_entries, arena);
     if (!loaded.ok) return loaded;
-    if (bha_cancelled(endpoint_height)) return ZCL_ERR(-5, "history archive: cancelled");
+    struct zcl_result cancel = block_index_history_cancel_refusal(endpoint_height);
+    if (!cancel.ok) return cancel;
     char path[4096];
     int n = snprintf(path, sizeof(path), "%s/blocks", archive_dir);
     struct blocks_mmap *reader = NULL;
@@ -1458,13 +1383,12 @@ static struct zcl_result bha_open(struct main_state *state,
     bmr_advise_reverse(reader);
     struct uint256 hash; memcpy(hash.data, endpoint_hash, sizeof(hash.data));
     struct block_index *tip = block_map_find(&state->map_block_index, &hash);
-    bool cancelled = false;
-    bool valid = bha_chain(state, reader, tip, endpoint_height, genesis, top_window, &cancelled);
+    struct zcl_result ancestry = block_index_history_ancestry_verify(state, reader, tip,
+        endpoint_height, genesis, top_window);
     bmr_close(reader);
-    if (!valid) {
+    if (!ancestry.ok) {
         if (top_window) memset(top_window, 0, ISLAND_ANCHOR_WINDOW * sizeof(*top_window));
-        if (cancelled) return ZCL_ERR(-5, "history archive: cancelled");
-        return ZCL_ERR(-3, "history archive: header ancestry invalid or unavailable");
+        return ancestry;
     }
     if (!active_chain_move_window_tip(&state->chain_active, tip)) {
         if (top_window) memset(top_window, 0, ISLAND_ANCHOR_WINDOW * sizeof(*top_window));
