@@ -30,13 +30,13 @@ static bool coin_lookup(const struct uint256 *txid, uint32_t index,
 }
 static bool load_transaction(const char *path, uint8_t *wire, size_t size, struct transaction *tx)
 {
+    transaction_init(tx);
     FILE *f = fopen(path, "rb");
     if (!f) return false;
     bool ok = fread(wire, 1, size, f) == size && fgetc(f) == EOF && !ferror(f);
     if (fclose(f) != 0 || !ok) return false;
     struct byte_stream stream;
     stream_init_from_data(&stream, wire, size);
-    transaction_init(tx);
     if (!transaction_v6_decode_prefix(tx, &stream, size) || stream_remaining(&stream)) {
         transaction_free(tx);
         return false;
