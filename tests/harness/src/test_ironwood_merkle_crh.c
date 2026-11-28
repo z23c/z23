@@ -53,18 +53,23 @@ static bool rejects(uint8_t *params, const uint8_t leaf[32])
     params[32] ^= 1;
     return ok;
 }
+static const uint8_t *load_resident_parameters(uint8_t *params, size_t capacity)
+{
+    FILE *f = fopen("engine/services/resources/ironwood/sinsemilla-merkle-parameters.bin", "rb");
+    if (!f) return NULL;
+    bool ok = fread(params, 1, capacity, f) == capacity && fgetc(f) == EOF && !ferror(f);
+    if (fclose(f) != 0 || !ok) return NULL;
+    size_t size = 0;
+    const uint8_t *resident = ironwood_resident_merkle_parameters(&size);
+    return resident && size == capacity && !memcmp(resident, params, capacity) &&
+        ironwood_resident_merkle_parameters(NULL) == resident ? resident : NULL;
+}
 int test_ironwood_merkle_crh(void)
 {
     uint8_t params[IRONWOOD_MERKLE_PARAMETERS_SIZE], empty[33][32], first[32], second[32];
-    FILE *f = fopen("engine/services/resources/ironwood/sinsemilla-merkle-parameters.bin", "rb");
-    if (!f) return 1;
-    bool ok = fread(params, 1, sizeof params, f) == sizeof params && fgetc(f) == EOF && !ferror(f);
-    if (fclose(f) != 0 || !ok) return 1;
-    size_t resident_size = 0;
-    const uint8_t *resident = ironwood_resident_merkle_parameters(&resident_size);
-    if (!resident || resident_size != sizeof params || memcmp(resident, params, sizeof params) ||
-        ironwood_resident_merkle_parameters(NULL) != resident) return 1;
-    ok = ironwood_merkle_parameters_validate(params, sizeof params).ok &&
+    const uint8_t *resident = load_resident_parameters(params, sizeof params);
+    if (!resident) return 1;
+    bool ok = ironwood_merkle_parameters_validate(params, sizeof params).ok &&
         zcl_hex_decode("7bd7041a794980ac3d8c413946d9a58e2b70de01ad27bfe18959f63d90e2b31a", first, 32) &&
         zcl_hex_decode("72d98fa009f5a73de8e05e9e25744cf6518f503881b1ed4056ae4fe176120f04", second, 32) &&
         empty_roots(resident, empty) && one_root(resident, empty, first) && two_root(resident, empty, first, second) &&
