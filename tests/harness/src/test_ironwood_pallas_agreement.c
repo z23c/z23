@@ -65,11 +65,34 @@ static bool fixture(const uint8_t ivk[32], const uint8_t wrong[32], const uint8_
         !ironwood_research_pallas_agree(wrong,epk,shared).ok || memcmp(shared,want,32)) return false;
     return !open_note(shared,action,plain);
 }
+/* Public synthetic H244 direct reward. Upstream Orchard 0.16 opens one
+ * Ironwood V3 note for the all-zero test key and rejects the [1;32] key.
+ * Transaction SHA256 e5595701e68f6de986cae48161aa05042bf4b1c78b31b8206606934181c44143.
+ * This checks agreement and AEAD only; wallet ownership also requires note
+ * commitment verification, durable indexing and a custody-safe key path. */
+static bool direct_reward(const uint8_t ivk[32], const uint8_t wrong[32])
+{
+    uint8_t wire[7000], shared[32], plain[564];
+    FILE *f = fopen("tests/fixtures/ironwood/direct-reward-note.v6", "rb");
+    if (!f) return false;
+    size_t n = fread(wire, 1, sizeof wire, f);
+    bool ok = !ferror(f) && feof(f) && n == 6054;
+    if (fclose(f)) ok = false;
+    struct v6_wire_view view;
+    if (!ok || v6_core_parse(wire,n,&view)!=V6_WIRE_OK || view.ironwood.count!=1 ||
+        view.ironwood.actions.size!=820) return false;
+    const uint8_t *action = view.ironwood.actions.data;
+    if (!ironwood_research_pallas_agree(ivk,action+128,shared).ok ||
+        !open_note(shared,action,plain) || plain[0]!=3 ||
+        zcl_read_u64_le(plain+12)!=1250000000) return false;
+    if (!ironwood_research_pallas_agree(wrong,action+128,shared).ok) return false;
+    return !open_note(shared,action,plain);
+}
 int test_ironwood_pallas_agreement(void)
 {
     uint8_t ivk[32], wrong[32], epk[32];
     if (!zcl_hex_decode("a1f875872973ea492de3be5ccecfe5567910244cb602994c5800f68c6438b91b",ivk,32) ||
         !zcl_hex_decode("691ab09ae9dc56d92d42d0c9fcc349f03288c3c13acf2de137ef1ba21cc4ee37",wrong,32) ||
         !zcl_hex_decode("54584886e0359da65fb9d846d2f6fb5d6e64869e66b922d02b6c74141004cd2b",epk,32)) return 1;
-    return boundaries(ivk,epk) && fixture(ivk,wrong,epk) ? 0 : 1;
+    return boundaries(ivk,epk) && fixture(ivk,wrong,epk) && direct_reward(ivk,wrong) ? 0 : 1;
 }
