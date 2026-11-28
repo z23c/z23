@@ -32,18 +32,22 @@ static const struct trace_row trace[] = {
     {'C', "a09c11c2e91c6dc9a9f795bcd1c22188574cdf0f0ce367360a76ec763599071028ce68446f4bb788539b33e3ff1cd467968472df6966c0a76de16746e69c8dfb"},
 };
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "transcript line %d: %s\n", __LINE__, #x); return 1; } } while (0)
-static int scalar_reader_refusal(const uint8_t *input, size_t length, bool initialized)
+static int scalar_reader_refusal(const uint8_t *input, size_t length, bool initialized,
+                                 bool prefailed, size_t out_size)
 {
     struct ironwood_halo2_transcript t = {0};
     struct zcl_codec_reader r;
     uint8_t out[32], saved[32];
     if (initialized) CHECK(ironwood_halo2_transcript_init(&t).ok);
     zcl_codec_reader_init(&r, input, length);
-    struct ironwood_halo2_transcript before = t;
-    struct zcl_codec_reader prior = r;
+    if (prefailed) r.error = ZCL_CODEC_BOUNDS;
+    struct ironwood_halo2_transcript before;
+    struct zcl_codec_reader prior;
+    memcpy(&before, &t, sizeof before);
+    memcpy(&prior, &r, sizeof prior);
     memset(out, 0xa5, sizeof out);
     memcpy(saved, out, sizeof out);
-    CHECK(!ironwood_halo2_read_scalar(&t, &r, out, sizeof out).ok);
+    CHECK(!ironwood_halo2_read_scalar(&t, &r, out, out_size).ok);
     CHECK(!memcmp(&t, &before, sizeof t));
     CHECK(!memcmp(&r, &prior, sizeof r));
     CHECK(!memcmp(out, saved, sizeof out));
@@ -70,8 +74,6 @@ static int scalar_reader_sequence(void)
     CHECK(ironwood_halo2_transcript_challenge(&t, a, sizeof a).ok);
     CHECK(ironwood_halo2_transcript_challenge(&expected, b, sizeof b).ok);
     CHECK(!memcmp(a, b, sizeof a));
-    CHECK(scalar_reader_refusal(wire, 31, true) == 0);
-    CHECK(scalar_reader_refusal(wire, 32, false) == 0);
     return 0;
 }
 
@@ -81,17 +83,22 @@ static int scalar_reader_boundaries(void)
     uint8_t wire[32], out[32];
     struct ironwood_halo2_transcript t;
     struct zcl_codec_reader r;
+    memset(wire, 0, sizeof wire);
+    CHECK(scalar_reader_refusal(wire, 31, true, false, 32) == 0);
+    CHECK(scalar_reader_refusal(wire, 32, false, false, 32) == 0);
+    CHECK(scalar_reader_refusal(wire, 32, true, true, 32) == 0);
+    CHECK(scalar_reader_refusal(wire, 32, true, false, 31) == 0);
     CHECK(ironwood_halo2_transcript_init(&t).ok);
     CHECK(zcl_hex_decode(modulus, wire, 32));
-    CHECK(scalar_reader_refusal(wire, 32, true) == 0);
+    CHECK(scalar_reader_refusal(wire, 32, true, false, 32) == 0);
     ++wire[0];
-    CHECK(scalar_reader_refusal(wire, 32, true) == 0);
+    CHECK(scalar_reader_refusal(wire, 32, true, false, 32) == 0);
     wire[0] -= 2;
     zcl_codec_reader_init(&r, wire, 32);
     CHECK(ironwood_halo2_read_scalar(&t, &r, out, sizeof out).ok);
     CHECK(r.position == 32 && !memcmp(out, wire, 32));
     memset(wire, 0xff, 32);
-    CHECK(scalar_reader_refusal(wire, 32, true) == 0);
+    CHECK(scalar_reader_refusal(wire, 32, true, false, 32) == 0);
     return 0;
 }
 static int reduction_checks(void)
