@@ -5,7 +5,10 @@
 #define IW_BALLOT "bb447e1ae3827c976f4ff08a5b5ac7379fa486ce1bc13480f3e9db7e0dc733af"
 #define IW_FIXTURE "tests/fixtures/ironwood/selected-manifest.json"
 #define IW_CMD_MS 120000L
-#define IW_SYNC_MS 180000L
+#define IW_BOOT_MS 15000L
+#define IW_MINE_MS 50000L
+#define IW_SYNC_MS 25000L
+#define IW_RESTART_MS 40000L
 
 struct iw_state {
     struct rnf miner, follower;
@@ -19,6 +22,34 @@ static struct sigaction iw_old_int, iw_old_term;
 static bool iw_armed;
 static volatile sig_atomic_t iw_interrupted;
 static bool iw_cleanup_failed;
+static long iw_title_deadline;
+static long iw_title_started;
+static int iw_last_height = -1;
+static char iw_last_hash[80];
+static const char *iw_title_name;
+static bool iw_hang_for_test;
+
+static void iw_title_begin(const char *name, long duration)
+{
+    iw_title_name = name;
+    iw_title_started = rnf_now_ms();
+    iw_title_deadline = iw_title_started + duration;
+    iw_last_height = -1;
+    iw_last_hash[0] = '\0';
+}
+
+static long iw_remaining(const char *step, long cap)
+{
+    long now = rnf_now_ms();
+    long remaining = iw_title_deadline - now;
+    if (remaining <= 0) {
+        printf("DEADLINE title=%s step=%s elapsed_ms=%ld last_height=%d last_hash=%s\n",
+               iw_title_name ? iw_title_name : "unknown", step,
+               now - iw_title_started, iw_last_height, iw_last_hash);
+        return 0;
+    }
+    return remaining < cap ? remaining : cap;
+}
 
 static void iw_signal(int sig)
 {
@@ -177,6 +208,10 @@ static bool iw_start(struct rnf *e, uint16_t peer, volatile sig_atomic_t *slot)
 
 static void iw_exec_child(const struct rnf *e, const char *const *words, int *p)
 {
+    if (iw_hang_for_test) {
+        sleep(2); /* real-clock: deliberately stalled child for deadline test */
+        _exit(0);
+    }
     if (dup2(p[1], STDOUT_FILENO) < 0 || dup2(p[1], STDERR_FILENO) < 0) _exit(127);
     close(p[0]);
     close(p[1]);
@@ -212,6 +247,8 @@ static int iw_wait_child(pid_t pid, long deadline)
 
 static int iw_call(struct rnf *e, const char *const *words)
 {
+    long remaining = iw_remaining(words[0], IW_CMD_MS);
+    if (remaining <= 0 || iw_interrupted) return -1;
     int p[2];
     iw.raw[0] = '\0';
     printf("RPC %s waiting\n", words[0]);
@@ -222,10 +259,11 @@ static int iw_call(struct rnf *e, const char *const *words)
     if (pid == 0) iw_exec_child(e, words, p);
     close(p[1]);
     /* real-clock: bound the external RPC and report its reply or timeout. */
-    long deadline = rnf_now_ms() + IW_CMD_MS;
+    long deadline = rnf_now_ms() + remaining;
     rnf_read_until(p[0], iw.raw, sizeof(iw.raw), deadline);
     close(p[0]);
     int rc = iw_wait_child(pid, deadline);
+    if (rc != 0) (void)iw_remaining(words[0], IW_CMD_MS);
     printf("RPC %s rc=%d raw:\n%s\n", words[0], rc, iw.raw);
     fflush(stdout);
     return rc;
@@ -263,7 +301,7 @@ static bool iw_hashes(size_t count)
 static bool iw_wait_up(struct rnf *e)
 {
     const char *const words[] = { "getblockchaininfo", NULL };
-    for (int attempt = 0; attempt < 240; attempt++) {
+    while (iw_remaining("readiness", 500) > 0) {
         int status;
         if (waitpid(e->node, &status, WNOHANG) == e->node) {
             printf("node exited before ready: status=%d\n", status);
@@ -282,7 +320,8 @@ static bool iw_wait_up(struct rnf *e)
             return up;
         }
         if (iw_interrupted) return false;
-        rnf_sleep_ms(500);
+        long pause = iw_remaining("readiness", 500);
+        if (pause > 0) rnf_sleep_ms(pause);
     }
     printf("readiness deadline: waiting for chain=ironwood\n");
     return false;
@@ -299,14 +338,16 @@ static bool iw_chain(struct rnf *e, int *height, char *hash, size_t cap)
     if (*end || n < 0 || n > INT32_MAX) return false;
     *height = (int)n;
     if (!iw_clean_reply(iw_call(e, best)) || !iw_scalar(hash, cap)) return false;
-    return strlen(hash) == 64;
+    if (strlen(hash) != 64) return false;
+    iw_last_height = *height;
+    snprintf(iw_last_hash, sizeof(iw_last_hash), "%s", hash);
+    return true;
 }
 
 static bool iw_agree(int expected, const char *expected_hash)
 {
     /* real-clock: bound independent-node synchronization polling. */
-    long deadline = rnf_now_ms() + IW_SYNC_MS;
-    while (rnf_now_ms() < deadline) {
+    while (iw_remaining("sync", 500) > 0) {
         int a = -1, b = -1;
         char ah[80] = "", bh[80] = "";
         bool miner = iw_chain(&iw.miner, &a, ah, sizeof(ah));
@@ -316,7 +357,8 @@ static bool iw_agree(int expected, const char *expected_hash)
         if (miner && follower && a == expected && b == expected &&
             strcmp(ah, expected_hash) == 0 && strcmp(ah, bh) == 0) return true;
         if (iw_interrupted) return false;
-        rnf_sleep_ms(500);
+        long pause = iw_remaining("sync", 500);
+        if (pause > 0) rnf_sleep_ms(pause);
     }
     printf("sync deadline: waiting for height %d hash %s\n", expected, expected_hash);
     return false;
@@ -328,7 +370,8 @@ static bool iw_stop(struct rnf *node, volatile sig_atomic_t *slot)
     if (pid <= 0) return false;
     kill(-pid, SIGTERM);
     /* real-clock: bound clean shutdown before reporting its exit status. */
-    long deadline = rnf_now_ms() + 60000L;
+    long remaining = iw_remaining("stop", 60000L);
+    long deadline = rnf_now_ms() + remaining;
     int rc = iw_wait_child(pid, deadline);
     node->node = 0;
     *slot = 0;
@@ -369,6 +412,7 @@ static int iw_boot(void)
 {
     int failures = 0, height = -1;
     char hash[80];
+    iw_title_begin("boot", IW_BOOT_MS);
     TEST(iw.research ? "research boot" : "regtest boot") {
         ASSERT(iw_prepare(&iw.miner, "ironwood_miner"));
         ASSERT(iw_prepare(&iw.follower, "ironwood_follower"));
@@ -377,6 +421,7 @@ static int iw_boot(void)
         ASSERT(iw_wait_up(&iw.miner));
         ASSERT(iw_chain(&iw.miner, &height, hash, sizeof(hash)));
         ASSERT_EQ(height, 0);
+        ASSERT(iw_remaining("boot complete", 1) > 0);
         PASS();
     } _test_next:;
     return failures;
@@ -394,6 +439,7 @@ static int iw_mine(void)
     char hash[80];
     const char *const address[] = { "getnewaddress", NULL };
     const char *const balance[] = { "getbalance", NULL };
+    iw_title_begin("mine", IW_MINE_MS);
     TEST(iw.research ? "research mine" : "regtest mine") {
         ASSERT(iw_clean_reply(iw_call(&iw.miner, address)));
         ASSERT(iw_scalar(iw.address, sizeof(iw.address)));
@@ -406,6 +452,7 @@ static int iw_mine(void)
         ASSERT(iw_clean_reply(iw_call(&iw.miner, balance)));
         ASSERT(rnf_zats(iw.raw) > 0);
         snprintf(iw.tip, sizeof(iw.tip), "%s", hash);
+        ASSERT(iw_remaining("mine complete", 1) > 0);
         PASS();
     } _test_next:;
     return failures;
@@ -414,11 +461,13 @@ static int iw_mine(void)
 static int iw_sync(void)
 {
     int failures = 0;
+    iw_title_begin("sync", IW_SYNC_MS);
     TEST(iw.research ? "research sync" : "regtest sync") {
         ASSERT(iw_start(&iw.follower, iw.miner.port[0], &iw_follower_pid));
         ASSERT(iw_wait_up(&iw.follower));
         ASSERT(iw_agree(101, iw.tip));
         printf("SYNC height=101 hash=%s\n", iw.tip);
+        ASSERT(iw_remaining("sync complete", 1) > 0);
         PASS();
     } _test_next:;
     return failures;
@@ -443,6 +492,7 @@ static int iw_restart(void)
     char peer[64];
     snprintf(peer, sizeof(peer), "127.0.0.1:%u", iw.miner.port[0]);
     const char *const connect[] = { "addnode", peer, "onetry", NULL };
+    iw_title_begin("restart", IW_RESTART_MS);
     TEST(iw.research ? "research restart" : "regtest restart") {
         ASSERT(iw_stop(&iw.follower, &iw_follower_pid));
         ASSERT(iw_stop(&iw.miner, &iw_miner_pid));
@@ -455,6 +505,7 @@ static int iw_restart(void)
         ASSERT(iw_clean_reply(iw_call(&iw.follower, connect)));
         ASSERT(iw_agree(101, iw.tip));
         printf("RESTART height=101 hash=%s\n", iw.tip);
+        ASSERT(iw_remaining("restart complete", 1) > 0);
         PASS();
     } _test_next:;
     return failures;
@@ -530,6 +581,27 @@ static int iw_test_quoted_cleanup(void)
     return failures;
 }
 
+static int iw_test_rpc_deadline(void)
+{
+    int failures = 0;
+    TEST("hung RPC respects the title deadline") {
+        const char *const words[] = { "getblockcount", NULL };
+        long start = rnf_now_ms();
+        iw_title_begin("hung RPC", 250);
+        printf("HUNG_RPC deadline_ms=%ld\n", iw_title_deadline - start);
+        iw_hang_for_test = true;
+        int rc = iw_call(&iw.miner, words);
+        long elapsed = rnf_now_ms() - start;
+        iw_hang_for_test = false;
+        iw_title_deadline = 0;
+        printf("HUNG_RPC elapsed_ms=%ld rc=%d\n", elapsed, rc);
+        ASSERT(rc != 0);
+        ASSERT(elapsed < 1000);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_ironwood_node_e2e(void);
 int test_ironwood_node_e2e(void)
 {
@@ -540,6 +612,7 @@ int test_ironwood_node_e2e(void)
     }
     int failures = iw_test_failed_setup_cleanup();
     failures += iw_test_quoted_cleanup();
+    failures += iw_test_rpc_deadline();
     if (failures) return failures;
     atexit(iw_cleanup);
     iw_arm();
