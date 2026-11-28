@@ -13,6 +13,7 @@
 #include "config/boot_fleet_board.h"
 #include "config/boot_fleet_roster.h"
 #include "config/boot_internal.h"
+#include "config/command_catalog.h"
 #include "config/runtime.h"
 #include "base/hex.h"
 #include "command/native_command.h"
@@ -1173,6 +1174,9 @@ static int test_fbi_cli(void)
         zcl_native_handle_fleet_board_inbox(&request, &reply);
         ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
         ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")), 3);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stopped_by")), "end");
+        ASSERT(!json_get_bool(json_get(&reply.data, "truncated_by_budget")));
+        ASSERT(!json_get(&reply.data, "notice"));
         ASSERT(reply.next_count >= 1);
         ASSERT_STR_EQ(reply.next[0].command, "fleet.board.wait");
         int64_t next = json_get_int(json_get(&reply.data, "next_after"));
@@ -1212,6 +1216,93 @@ static int test_fbi_cli(void)
     return failures;
 }
 
+static int test_fbi_cli_budget(void)
+{
+    int failures = 0;
+    TEST("board inbox CLI: default byte pages continue exactly once in arrival order") {
+        struct fbi_fixture f;
+        struct fleet_board_post parent, posts[20];
+        struct json_value input;
+        struct zcl_command_reply reply;
+        char text[181];
+        ASSERT(fbi_open(&f, "cli-budget"));
+        ASSERT(fbi_post(&f, 1, FLEET_BOARD_KIND_PROBLEM, FLEET_BOARD_SCOPE_PUBLIC,
+                        "lane-a", "question", NULL, NULL, f.now, f.now, &parent));
+        for (unsigned i = 0; i < 20; i++) {
+            memset(text, 'a' + (int)(i % 26), sizeof(text) - 1);
+            text[sizeof(text) - 1] = '\0';
+            ASSERT(fbi_post(&f, 2, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_PUBLIC,
+                            "lane-b", text, parent.id, NULL, f.now + i, f.now + i,
+                            &posts[i]));
+        }
+        g_fbi_table = &f.table;
+        node_rpc_client_set_test_hook(fbi_hook);
+        int64_t after = 0;
+        size_t seen = 0, pages = 0;
+        bool more;
+        do {
+            json_init(&input);
+            json_set_object(&input);
+            ASSERT(json_push_kv_str(&input, "agent", "lane-a") &&
+                   json_push_kv_int(&input, "after", after));
+            struct zcl_command_request request = {.input = &input, .budget_bytes = 4096};
+            zcl_command_reply_init(&reply, "zcl.fleet_board_inbox.v1");
+            zcl_native_handle_fleet_board_inbox(&request, &reply);
+            ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+            const struct json_value *rows = json_get(&reply.data, "rows");
+            size_t count = json_size(rows);
+            ASSERT(count > 0);
+            ASSERT(json_write(&reply.data, NULL, 0) < 3072);
+            if (pages == 0) {
+                ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stopped_by")), "byte_budget");
+                ASSERT(json_get_bool(json_get(&reply.data, "truncated_by_budget")));
+                ASSERT_EQ(json_get_int(json_get(&reply.data, "byte_budget")), 4096);
+                const struct zcl_command_registry *reg = zcl_command_catalog();
+                const struct zcl_command_spec *spec =
+                    zcl_command_registry_find(reg, "fleet.board.inbox", NULL);
+                struct zcl_command_context ctx = {.registry = reg,
+                    .granted_capabilities = ~(uint64_t)0,
+                    .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+                char wire[4097];
+                enum zcl_command_exit rc;
+                ASSERT(spec);
+                size_t n = zcl_command_registry_execute_json(reg, spec, &ctx, &input,
+                    false, "fleet.board.inbox", "normal", 4096, 0, NULL,
+                    wire, sizeof(wire), &rc);
+                ASSERT(n > 0 && n <= 4096);
+                ASSERT_EQ(rc, ZCL_COMMAND_EXIT_OK);
+            }
+            for (size_t i = 0; i < count; i++) {
+                const struct json_value *row = json_at(rows, i);
+                ASSERT(seen < 20 && fbi_id_is(json_get_str(json_get(row, "id")), &posts[seen]));
+                int64_t arrival = json_get_int(json_get(row, "arrival"));
+                ASSERT(arrival > after);
+                after = arrival;
+                seen++;
+            }
+            ASSERT_EQ(json_get_int(json_get(&reply.data, "next_after")), after);
+            ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")), (int64_t)count);
+            more = json_get_bool(json_get(&reply.data, "has_more"));
+            if (!more) {
+                ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stopped_by")), "end");
+                ASSERT(!json_get_bool(json_get(&reply.data, "truncated_by_budget")));
+                ASSERT(!json_get(&reply.data, "notice"));
+            }
+            pages++;
+            ASSERT(pages <= 20);
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+        } while (more);
+        ASSERT_EQ(seen, 20u);
+        ASSERT(pages > 1);
+        node_rpc_client_set_test_hook(NULL);
+        g_fbi_table = NULL;
+        fbi_close(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_fleet_board_inbox(void)
 {
     int failures = 0;
@@ -1230,5 +1321,6 @@ int test_fleet_board_inbox(void)
     failures += test_fbi_delivery_record();
     failures += test_fbi_delivery_dropped();
     failures += test_fbi_cli();
+    failures += test_fbi_cli_budget();
     return failures;
 }

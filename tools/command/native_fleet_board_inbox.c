@@ -154,6 +154,129 @@ static int64_t fbi_next_after(const struct json_value *body, int64_t fallback)
     return v && v->type == JSON_INT ? json_get_int(v) : fallback;
 }
 
+/* Keep the same envelope allowance used by the board list projection. */
+static size_t fbi_cap(const struct zcl_command_request *request)
+{
+    size_t cap = request->spec && request->spec->budget_bytes
+                     ? (size_t)request->spec->budget_bytes : ZCL_COMMAND_RESULT_BUDGET;
+    if (request->budget_bytes && request->budget_bytes < cap)
+        cap = request->budget_bytes;
+    return cap;
+}
+
+static bool fbi_page_copy(struct json_value *data, const struct json_value *body)
+{
+    for (size_t i = 0; body->keys && i < body->num_children; i++) {
+        const char *key = body->keys[i];
+        if (!key || !strcmp(key, "ok") || !strcmp(key, "rows") ||
+            !strcmp(key, "returned") || !strcmp(key, "next_after") ||
+            !strcmp(key, "has_more") || !strcmp(key, "next") ||
+            !strcmp(key, "next_read") || !strcmp(key, "unvouched") ||
+            !strcmp(key, "trust_note"))
+            continue;
+        if (!json_push_kv(data, key, &body->children[i]))
+            return false;
+    }
+    return true;
+}
+
+static bool fbi_page_commands(struct json_value *data, const struct fbi_req *r,
+                              int64_t cursor)
+{
+    char cmd[256], ref[80] = "";
+    if (r->ref[0])
+        (void)snprintf(ref, sizeof(ref), " --ref=%s", r->ref);
+    (void)snprintf(cmd, sizeof(cmd), "z23 fleet board wait --agent=%s --after=%lld%s",
+                   r->agent, (long long)cursor, ref);
+    bool ok = json_push_kv_str(data, "next", cmd);
+    (void)snprintf(cmd, sizeof(cmd), "z23 fleet board inbox --agent=%s --after=%lld%s",
+                   r->agent, (long long)cursor, ref);
+    return ok && json_push_kv_str(data, "next_read", cmd);
+}
+
+static bool fbi_page_rows(const struct json_value *source, struct json_value *rows,
+                          size_t used, size_t max, unsigned *unvouched)
+{
+    for (size_t i = 0; i < json_size(source); i++) {
+        const struct json_value *row = json_at(source, i);
+        size_t n = json_write(row, NULL, 0) + 1;
+        if (used + n > max)
+            break;
+        if (!json_push_back(rows, row))
+            return false;
+        used += n;
+        *unvouched += json_get_bool(json_get(row, "author_role")) ? 0u : 1u;
+    }
+    return true;
+}
+
+static bool fbi_page_metadata(struct json_value *data, size_t cap,
+                              bool cut, bool more)
+{
+    return json_push_kv_bool(data, "has_more", more) &&
+           json_push_kv_str(data, "stopped_by", cut ? "byte_budget" : more ? "limit" : "end") &&
+           json_push_kv_bool(data, "truncated_by_budget", cut) &&
+           json_push_kv_int(data, "byte_budget", (int64_t)cap) &&
+           (!cut || json_push_kv_str(data, "notice",
+               "The reply byte budget cut this page before the row limit; continue with next_after."));
+}
+
+static bool fbi_page_fields(struct json_value *data, const struct json_value *body,
+                            const struct json_value *rows, const struct fbi_req *r,
+                            size_t cap, unsigned unvouched, int64_t *cursor)
+{
+    const struct json_value *source = json_get(body, "rows");
+    size_t count = json_size(rows);
+    bool cut = count < json_size(source);
+    bool more = cut || json_get_bool(json_get(body, "has_more"));
+    *cursor = cut && count
+        ? json_get_int(json_get(json_at(rows, count - 1), "arrival"))
+        : fbi_next_after(body, r->after);
+    const struct json_value *trust = json_get(body, "trust_note");
+    return !(cut && !count) &&
+         json_push_kv(data, "rows", rows) &&
+         json_push_kv_int(data, "returned", (int64_t)count) &&
+         (!unvouched || (trust && json_push_kv_int(data, "unvouched", unvouched) &&
+                         json_push_kv(data, "trust_note", trust))) &&
+         json_push_kv_int(data, "next_after", *cursor) &&
+         fbi_page_metadata(data, cap, cut, more) &&
+         fbi_page_commands(data, r, *cursor);
+}
+
+static bool fbi_page_project(const struct zcl_command_request *request,
+                             struct zcl_command_reply *reply,
+                             const struct json_value *body, struct fbi_req *r)
+{
+    const struct json_value *source = json_get(body, "rows");
+    struct json_value rows, data;
+    json_init(&rows);
+    json_set_array(&rows);
+    json_init(&data);
+    json_set_object(&data);
+    size_t cap = fbi_cap(request);
+    bool ok = source && source->type == JSON_ARR && fbi_page_copy(&data, body);
+    size_t used = json_write(&data, NULL, 0) + 400;
+    size_t max = cap > 1024 ? cap - 1024 : 0;
+    unsigned unvouched = 0;
+    int64_t cursor = r->after;
+    ok = ok && fbi_page_rows(source, &rows, used, max, &unvouched) &&
+         fbi_page_fields(&data, body, &rows, r, cap, unvouched, &cursor);
+    if (ok) {
+        json_free(&reply->data);
+        reply->data = data;
+        r->after = cursor;
+    } else {
+        json_free(&data);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_FAILED, "BOARD_PAGE_BUDGET",
+                               "serialize", false, false,
+                               "the inbox page could not fit or be allocated",
+                               "fleet.board.inbox");
+    }
+    json_free(&rows);
+    return ok;
+}
+
 /* One node call into `body`. False with the refusal in `reply`. */
 static bool fbi_call(const struct fbi_req *r, const char *op, int64_t slice_ms,
                      struct zcl_command_reply *reply, struct json_value *body)
@@ -185,8 +308,8 @@ void zcl_native_handle_fleet_board_inbox(const struct zcl_command_request *reque
     struct json_value body;
     if (!fbi_parse(request, reply, &r))
         return;
-    if (fbi_call(&r, "inbox", -1, reply, &body) && fbi_project(reply, &body)) {
-        r.after = fbi_next_after(&body, r.after);
+    if (fbi_call(&r, "inbox", -1, reply, &body) &&
+        fbi_page_project(request, reply, &body, &r)) {
         fbi_next(reply, "fleet.board.wait", &r,
                  "block until the next row for you arrives, from this cursor");
     }
