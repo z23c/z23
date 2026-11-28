@@ -528,10 +528,14 @@ static void test_derive_builtin_dirs(struct fx *x,
 #if !defined(_WIN32)
 static void test_toolchain_directory_binding(struct fx *x)
 {
-    char tmp[PATH_MAX], kit[PATH_MAX], include[PATH_MAX], bin[PATH_MAX], raw[PATH_MAX];
+    char tmp[PATH_MAX], kit[PATH_MAX], include[PATH_MAX] = {0};
+    char bin[PATH_MAX] = {0}, raw[PATH_MAX] = {0};
     test_make_tmpdir(tmp, sizeof(tmp), "action_root", "toolchain_path");
-    bool ok = platform_directory_canonical_real(tmp, kit, sizeof(kit)) &&
-              snprintf(include, sizeof(include), "%s/include", kit) < (int)sizeof(include) &&
+    bool canonical = platform_directory_canonical_real(tmp, kit, sizeof(kit));
+    AR_CHECK("toolchain fixture is canonical", canonical);
+    if (!canonical)
+        return;
+    bool ok = snprintf(include, sizeof(include), "%s/include", kit) < (int)sizeof(include) &&
               snprintf(bin, sizeof(bin), "%s/bin", kit) < (int)sizeof(bin) &&
               snprintf(raw, sizeof(raw), "%s/bin/../include", kit) < (int)sizeof(raw) &&
               mkdir(include, 0700) == 0 && mkdir(bin, 0700) == 0;
@@ -3180,11 +3184,14 @@ static void observation_driver_chain(struct observation_fixture *fixture)
     char driver[PATH_MAX], tmp[PATH_MAX], linkdir[PATH_MAX];
     test_make_tmpdir(tmp, sizeof(tmp), "action_root", "compiler_links");
     bool canonical = platform_directory_canonical_real(tmp, linkdir, sizeof(linkdir));
+    AR_CHECK("observation compiler link fixture is canonical", canonical);
+    if (!canonical)
+        return;
     (void)snprintf(driver, sizeof(driver), "%s/cc", linkdir);
     const char *original = fixture->argv[0];
     char intermediate[PATH_MAX];
     (void)snprintf(intermediate, sizeof(intermediate), "%s/cc-link", linkdir);
-    bool linked = canonical && symlink(fixture->compiler, intermediate) == 0 &&
+    bool linked = symlink(fixture->compiler, intermediate) == 0 &&
                   symlink("cc-link", driver) == 0;
     fixture->argv[0] = driver;
     observation = NULL;
