@@ -9,6 +9,7 @@
 #include "script/script.h"
 #include "script/script_flags.h"
 #include "services/ironwood_checked_wire.h"
+#include "services/ironwood_verification_setup.h"
 #include <string.h>
 
 static bool private_profile(void)
@@ -55,12 +56,12 @@ enum ironwood_context_auth_result ironwood_context_authenticate(
     enum ironwood_context_auth_result r = resolve_input(tx, resolve, user, &coin);
     if (r != IRONWOOD_CONTEXT_COMPONENTS_OK) return r;
     struct transaction_v6_prevout transparent = {coin.value, coin.script, coin.script_len};
-    struct v6_prevout shielded = {(uint64_t)coin.value, {coin.script, coin.script_len}};
     size_t n = tx->num_vin;
     if (n && !v6_transparent_verify_p2pkh(tx->v6_wire.data, tx->v6_wire.size,
             &transparent, n, 0, expected_branch, script_flags).ok)
         return IRONWOOD_CONTEXT_CHECK_UNAVAILABLE;
-    if (!ironwood_bundle_authenticate(tx->v6_wire.data, tx->v6_wire.size,
-            n ? &shielded : NULL, n).ok) return IRONWOOD_CONTEXT_CHECK_UNAVAILABLE;
+    if (!ironwood_bundle_authenticate_checked(tx, expected_branch,
+            n ? &transparent : NULL, n, ironwood_postnu63_verification_setup()).ok)
+        return IRONWOOD_CONTEXT_CHECK_UNAVAILABLE;
     return IRONWOOD_CONTEXT_COMPONENTS_OK;
 }

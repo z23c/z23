@@ -11,15 +11,18 @@
 #include "validate_work_pool.h"
 
 #include "chain/chainparams.h"
+#include "controllers/ironwood_bundle_auth.h"
 #include "consensus/upgrades.h"
 #include "core/uint256.h"
 #include "domain/consensus/sighash.h"
 #include "primitives/transaction.h"
 #include "primitives/transaction_v6_sighash.h"
+#include "primitives/transaction_v6_wire.h"
 #include "script/interpreter.h"
 #include "script/script.h"
 #include "script/script_error.h"
 #include "script/script_flags.h"
+#include "services/ironwood_verification_setup.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/reducer_stage_profile.h"
@@ -197,6 +200,34 @@ static bool sv_serial_input(const struct transaction *tx, size_t vi,
     return false;
 }
 
+static bool sv_ironwood_bundle(const struct transaction *tx, uint32_t branch_id,
+                            const struct transaction_v6_prevout *prevouts,
+                            struct script_verify_summary *out)
+{
+    if (domain_consensus_signature_hash_version(tx) !=
+        DOMAIN_CONSENSUS_SIGVERSION_IRONWOOD) return true;
+    struct v6_wire_view view;
+    if (tx->v6_wire.data &&
+        v6_core_parse(tx->v6_wire.data, tx->v6_wire.size, &view) == V6_WIRE_OK &&
+        !view.ironwood.count) return true;
+    uint64_t alloc_failures = zcl_alloc_failure_count();
+    struct zcl_result r = ironwood_bundle_authenticate_checked(tx, branch_id,
+        prevouts, tx->num_vin, ironwood_postnu63_verification_setup());
+    if (r.ok) return true;
+    if (zcl_alloc_failure_count() != alloc_failures) {
+        sv_write_local_failure(out, &tx->hash, 0);
+        return false;
+    }
+    out->ok = 0;
+    out->first_failure_txid = tx->hash;
+    snprintf(out->reason, sizeof(out->reason), "ironwood_auth_invalid");
+    char txhex[65];
+    uint256_get_hex(&tx->hash, txhex);
+    LOG_WARN("script_validate", "[script_validate] %s tx=%s: %s",
+             out->reason, txhex, r.message);
+    return false;
+}
+
 static bool sv_serial_tx(const struct transaction *tx, int height,
                          uint32_t flags, uint32_t branch_id,
                          const struct sv_resolvers *r,
@@ -218,7 +249,7 @@ static bool sv_serial_tx(const struct transaction *tx, int height,
         return false;
     }
     if (tx->num_vin == 0)
-        return true;
+        return sv_ironwood_bundle(tx, branch_id, NULL, out);
 
     struct sv_resolved_prevout *resolved =
         zcl_calloc(tx->num_vin, sizeof(*resolved), "sv serial prevouts");
@@ -250,6 +281,7 @@ static bool sv_serial_tx(const struct transaction *tx, int height,
     for (size_t vi = 0; ok && vi < tx->num_vin; vi++)
         ok = sv_serial_input(tx, vi, &resolved[vi], prevouts, &txdata,
                              height, flags, branch_id, out);
+    if (ok) ok = sv_ironwood_bundle(tx, branch_id, prevouts, out);
     free(resolved);
     free(prevouts);
     return ok;
@@ -509,11 +541,15 @@ static bool sv_parallel(const struct block *blk, int height, uint32_t flags,
                         struct script_verify_summary *out)
 {
     size_t n_inputs = 0;
+    bool ironwood = false;
     for (size_t ti = 0; ti < blk->num_vtx; ti++) {
         const struct transaction *tx = &blk->vtx[ti];
+        if (domain_consensus_signature_hash_version(tx) ==
+            DOMAIN_CONSENSUS_SIGVERSION_IRONWOOD) ironwood = true;
         if (!transaction_is_coinbase(tx))
             n_inputs += tx->num_vin;
     }
+    if (ironwood) return false;
     if (n_inputs == 0) {
         out->tx_count = blk->num_vtx;      /* no inputs: verdict trivially ok */
         return true;
