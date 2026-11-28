@@ -1,0 +1,4 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("engine/services/src/ironwood_halo2_transcript.c", CAP_RANDOM,
+    "Calls OpenSSL prime-field point decompression. Its general square-root "
+    "implementation can draw random candidates.")

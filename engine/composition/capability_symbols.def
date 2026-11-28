@@ -639,6 +639,9 @@ ZCL_CAPABILITY_SYMBOL("X509_sign", CAP_WALLET,
 
 /* ---- CAP_RANDOM ---- */
 ZCL_CAPABILITY_SYMBOL("BN_rand", CAP_RANDOM, "")
+ZCL_CAPABILITY_SYMBOL("EC_POINT_set_compressed_coordinates", CAP_RANDOM,
+    "Prime-field decompression may draw random square-root candidates. "
+    "The fixed Pasta primes use a small deterministic candidate.")
 ZCL_CAPABILITY_SYMBOL("EVP_PKEY_Q_keygen", CAP_RANDOM,
     "Draws a fresh private key from the generator. Classed here rather "
     "than CAP_WALLET because the failure that matters is a predictable "
@@ -923,8 +926,13 @@ ZCL_CAPABILITY_SYMBOL("BIO_new", CAP_HARMLESS,
 ZCL_CAPABILITY_SYMBOL("BIO_s_mem", CAP_HARMLESS,
     "The memory method, which is the only BIO method this tree "
     "references.")
+ZCL_CAPABILITY_SYMBOL("BN_CTX_free", CAP_HARMLESS, "Releases temporary integer storage.")
+ZCL_CAPABILITY_SYMBOL("BN_CTX_new", CAP_HARMLESS, "Allocates a context for in-memory integer arithmetic.")
+ZCL_CAPABILITY_SYMBOL("BN_bn2lebinpad", CAP_HARMLESS, "Serializes an integer into the caller's little-endian buffer.")
 ZCL_CAPABILITY_SYMBOL("BN_free", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("BN_lebin2bn", CAP_HARMLESS, "Decodes the caller's little-endian integer.")
 ZCL_CAPABILITY_SYMBOL("BN_new", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("BN_set_word", CAP_HARMLESS, "Sets an integer to the caller's machine word.")
 ZCL_CAPABILITY_SYMBOL("BN_to_ASN1_INTEGER", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("calloc", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("close", CAP_HARMLESS,
@@ -945,6 +953,14 @@ ZCL_CAPABILITY_SYMBOL("deflateEnd", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("deflateInit2_", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("dirfd", CAP_HARMLESS,
     "Inspects a handle the caller already holds.")
+ZCL_CAPABILITY_SYMBOL("EC_GROUP_free", CAP_HARMLESS, "Releases the in-memory group.")
+ZCL_CAPABILITY_SYMBOL("EC_GROUP_new_curve_GFp", CAP_HARMLESS,
+    "Constructs the explicit public prime-field group in memory.")
+ZCL_CAPABILITY_SYMBOL("EC_POINT_free", CAP_HARMLESS, "Releases the in-memory point.")
+ZCL_CAPABILITY_SYMBOL("EC_POINT_get_affine_coordinates", CAP_HARMLESS, "Computes affine coordinates of a public point.")
+ZCL_CAPABILITY_SYMBOL("EC_POINT_is_at_infinity", CAP_HARMLESS, "Tests the identity element of an in-memory group.")
+ZCL_CAPABILITY_SYMBOL("EC_POINT_is_on_curve", CAP_HARMLESS, "Checks the curve equation over a public field.")
+ZCL_CAPABILITY_SYMBOL("EC_POINT_new", CAP_HARMLESS, "Allocates an in-memory point for the caller's group.")
 ZCL_CAPABILITY_SYMBOL("EVP_aes_256_gcm", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("EVP_CIPHER_CTX_ctrl", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("EVP_CIPHER_CTX_free", CAP_HARMLESS, "")
