@@ -2301,6 +2301,7 @@ AGENT_IMPACT_RULE("platform/modules/platform/include/platform/socket_compat.h", 
 AGENT_IMPACT_RULE("platform/modules/platform/include/platform/system_memory.h", "make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/platform/include/platform/thread_compat.h", "make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/platform/src/os_sandbox_stub.c", "os_sandbox make_lint_gates")
+AGENT_IMPACT_RULE("engine/services/src/research_version.c|engine/services/include/services/research_version.h|tests/harness/src/test_research_version.c", "research_version")
 AGENT_IMPACT_RULE("platform/modules/platform/src/rng.c", "make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/util/src/self_backtrace_stub.c", "self_backtrace make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/util/include/util/thread_qos.h", "thread_qos make_lint_gates")
