@@ -1843,6 +1843,19 @@ static int cas_test_research_private_directory(void)
     return failures;
 }
 
+static bool cas_research_oneshot(char *const argv[], const char *home,
+                                 const char *expected, char *out, size_t cap)
+{
+    int rc = cas_run(argv, home, out, cap);
+    bool ok = rc == 0 && strstr(out, expected) &&
+              strstr(out, "Backfill ZSLP: re-deriving");
+    if (!ok) {
+        size_t n = strlen(out);
+        test_note("research boot rc=%d tail=%s", rc, out + (n > 1000 ? n - 1000 : 0));
+    }
+    return ok;
+}
+
 static int cas_test_research_datadir(void)
 {
     int failures = 0;
@@ -1852,19 +1865,19 @@ static int cas_test_research_datadir(void)
         int n = snprintf(expected, sizeof(expected), "datadir=%s/.zclassic-c23-ironwood-research", home);
         ASSERT(n > 0 && (size_t)n < sizeof(expected));
         char *argv[] = {(char *)CAS_BIN, (char *)"--testnet-profile=ironwood",
-                        (char *)"-nolegacyimport", (char *)"-nobgvalidation", NULL};
-        const char *needles[] = {expected, NULL};
-        bool found = cas_run_daemon_wait_for(argv, home, needles, 20000, out, sizeof(out));
+                        (char *)"-nolegacyimport", (char *)"-nobgvalidation",
+                        (char *)"-backfill-zslp", NULL};
+        bool found = cas_research_oneshot(argv, home, expected, out, sizeof(out));
         char parent_flag[PATH_MAX + 16];
         int p = snprintf(parent_flag, sizeof(parent_flag), "-datadir=%s", home);
         int e = snprintf(expected, sizeof(expected), "datadir=%s/ironwood-research", home);
         char *explicit_argv[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
-                                 parent_flag, (char *)"-nolegacyimport", NULL};
+                                 parent_flag, (char *)"-nolegacyimport",
+                                 (char *)"-backfill-zslp", NULL};
         bool explicit_found = p > 0 && (size_t)p < sizeof(parent_flag) &&
             e > 0 && (size_t)e < sizeof(expected) &&
-            cas_run_daemon_wait_for(explicit_argv, home, needles, 20000, out, sizeof(out));
-        bool restart_found = explicit_found &&
-            cas_run_daemon_wait_for(explicit_argv, home, needles, 20000, out, sizeof(out));
+            cas_research_oneshot(explicit_argv, home, expected, out, sizeof(out));
+        bool restart_found = cas_research_oneshot(explicit_argv, home, expected, out, sizeof(out));
         (void)test_rm_rf_recursive(home);
         ASSERT(found && explicit_found && restart_found);
         PASS();
