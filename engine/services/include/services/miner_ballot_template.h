@@ -28,8 +28,8 @@ struct zcl_result miner_ballot_template_apply(struct block *block,
     const struct chain_params *params, int height, size_t mining_limit,
     size_t *reserved_size_out);
 
-/* Fit a research template by dropping only a trailing transaction suffix.
+/* Fit a research template to the supplied limit by dropping a trailing suffix.
  * The caller discards the template on any error. */
 struct zcl_result miner_research_template_fit(struct block_template *tmpl,
-    const struct chain_params *params, int height, bool reserve_ballot);
+    const struct chain_params *params, int height, bool reserve_ballot, size_t limit);
 #endif

@@ -67,7 +67,8 @@ static bool mining_finish_template(struct block_template *tmpl,
     bool genesis, bool reserve_ballot, const char **reason)
 {
     if (research_block_size_limit(cp) == RESEARCH_BLOCK_SIZE_LIMIT) {
-        struct zcl_result fit = miner_research_template_fit(tmpl, cp, height, reserve_ballot);
+        struct zcl_result fit = miner_research_template_fit(tmpl, cp, height, reserve_ballot,
+                                                             RESEARCH_BLOCK_SIZE_LIMIT);
         if (!fit.ok) { *reason = "Could not fit research block template"; return false; }
     }
     if (!mining_stamp_sapling_final_root(&tmpl->block, height, cp, parent_root, genesis)) {

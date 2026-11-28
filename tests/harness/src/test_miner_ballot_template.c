@@ -117,7 +117,8 @@ static bool bt_retained_sapling_root(struct block *block, const struct chain_par
         uint256_eq(&block->header.hashFinalSaplingRoot, &expected);
 }
 
-static int bt_research_fit_case(size_t count, size_t script_size, bool ballot, bool zero_fee, bool sapling)
+static int bt_research_fit_case(size_t count, size_t script_size, bool ballot, bool zero_fee, bool sapling,
+                                size_t limit)
 {
     int failures = 0;
     struct block_template bt = {0};
@@ -150,8 +151,10 @@ static int bt_research_fit_case(size_t count, size_t script_size, bool ballot, b
     bt.num_entries = count;
     bt.tx_fees[0] = zero_fee ? 0 : -(int64_t)(count - 1);
     if (!zero_fee) bt.block.vtx[0].vout[0].value += (int64_t)(count - 1);
-    BT_CHECK(miner_research_template_fit(&bt, d->chain, 1, ballot).ok);
-    BT_CHECK(bt.block.num_vtx < count && bt.num_entries == bt.block.num_vtx);
+    BT_CHECK(miner_research_template_fit(&bt, d->chain, 1, ballot, limit).ok);
+    if (limit == 200000) BT_CHECK(bt.block.num_vtx < count);
+    else BT_CHECK(bt.block.num_vtx == count);
+    BT_CHECK(bt.num_entries == bt.block.num_vtx);
     BT_CHECK(bt.block.vtx[0].vout[0].value == 42 + (zero_fee ? 0 : (int64_t)bt.num_entries - 1));
     BT_CHECK(bt.tx_fees[0] == (zero_fee ? 0 : -(int64_t)(bt.num_entries - 1)));
     BT_CHECK(bt_merkle_matches(&bt.block));
@@ -160,12 +163,13 @@ static int bt_research_fit_case(size_t count, size_t script_size, bool ballot, b
     struct equihash_params ep;
     equihash_params_init(&ep, chain_params_equihash_n(d->chain, 1), chain_params_equihash_k(d->chain, 1));
     size_t bound = bt_serialized_block_bound(&bt.block, ep.solution_width);
-    BT_CHECK(bound <= 200000);
+    BT_CHECK(bound <= limit);
+    if (limit > 200000) BT_CHECK(bound > 200000);
     if (ballot) {
         uint8_t catalog[32] = {3}, bitmap[32] = {1};
         size_t reserved = 0;
         BT_CHECK(miner_ballot_template_apply(&bt.block, catalog, bitmap, d->chain, 1,
-                                              200000, &reserved).ok && reserved <= 200000);
+                                              limit, &reserved).ok && reserved <= limit);
     }
 done:
     block_template_free(&bt);
@@ -175,11 +179,12 @@ done:
 int test_miner_ballot_template(void)
 {
     int failures = 0;
-    failures += bt_research_fit_case(30, 8000, false, false, false);
-    failures += bt_research_fit_case(30, 8000, true, false, false);
-    failures += bt_research_fit_case(255, 790, false, false, false);
-    failures += bt_research_fit_case(30, 8000, false, true, false);
-    failures += bt_research_fit_case(30, 8000, false, false, true);
+    failures += bt_research_fit_case(30, 8000, false, false, false, 200000);
+    failures += bt_research_fit_case(30, 8000, true, false, false, 200000);
+    failures += bt_research_fit_case(255, 790, false, false, false, 200000);
+    failures += bt_research_fit_case(30, 8000, false, true, false, 200000);
+    failures += bt_research_fit_case(30, 8000, false, false, true, 200000);
+    failures += bt_research_fit_case(30, 8000, false, false, false, MAX_BLOCK_SIZE);
     struct block block = {0};
     uint8_t catalog[32] = {3}, bitmap[32] = {1}, expected[MINER_SIGNAL_SCRIPT_BYTES];
     const struct chain_params *params;

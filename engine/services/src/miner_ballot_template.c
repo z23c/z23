@@ -116,9 +116,8 @@ struct zcl_result miner_ballot_template_apply(struct block *block,
 /* Reserve a maximum coinbase script and the selected Equihash solution;
  * optional ballot output growth includes the output-count CompactSize. */
 static struct zcl_result research_reserved_size(struct block *block,
-    size_t solution_size, bool reserve_ballot, size_t *out)
+    size_t solution_size, bool reserve_ballot, size_t limit, size_t *out)
 {
-    size_t limit = RESEARCH_BLOCK_SIZE_LIMIT;
     struct transaction *cb = &block->vtx[0];
     size_t extra = reserve_ballot ? 8 + compact_size_sizeof(MINER_SIGNAL_SCRIPT_BYTES) +
         MINER_SIGNAL_SCRIPT_BYTES + compact_size_sizeof(cb->num_vout + 1) -
@@ -154,9 +153,8 @@ static bool research_coinbase_valid(const struct transaction *cb, bool reserve_b
 /* Determine the longest fitting prefix with one bounded buffer and a single
  * serialization per candidate transaction. A final full-block check follows. */
 static struct zcl_result research_fitting_prefix(struct block *block,
-    size_t solution_size, bool reserve_ballot, size_t *count_out)
+    size_t solution_size, bool reserve_ballot, size_t limit, size_t *count_out)
 {
-    size_t limit = RESEARCH_BLOCK_SIZE_LIMIT;
     struct transaction *cb = &block->vtx[0];
     size_t extra = reserve_ballot ? 8 + compact_size_sizeof(MINER_SIGNAL_SCRIPT_BYTES) +
         MINER_SIGNAL_SCRIPT_BYTES + compact_size_sizeof(cb->num_vout + 1) -
@@ -235,10 +233,12 @@ static struct zcl_result research_template_drop_last(struct block_template *tmpl
 }
 
 struct zcl_result miner_research_template_fit(struct block_template *tmpl,
-    const struct chain_params *params, int height, bool reserve_ballot)
+    const struct chain_params *params, int height, bool reserve_ballot, size_t limit)
 {
     struct zcl_result valid = research_template_validate(tmpl, params, height, reserve_ballot);
     if (!valid.ok) return valid;
+    if (!limit || limit > research_block_size_ceiling(params))
+        return ZCL_ERR(-28, "Invalid research template size limit");
     unsigned n = chain_params_equihash_n(params, height);
     unsigned k = chain_params_equihash_k(params, height);
     if (!equihash_params_supported(n, k)) return ZCL_ERR(-25, "Unsupported Equihash parameters");
@@ -248,13 +248,13 @@ struct zcl_result miner_research_template_fit(struct block_template *tmpl,
         return ZCL_ERR(-26, "Invalid Equihash solution width");
     struct block *block = &tmpl->block;
     size_t keep = 0;
-    struct zcl_result r = research_fitting_prefix(block, ep.solution_width, reserve_ballot, &keep);
+    struct zcl_result r = research_fitting_prefix(block, ep.solution_width, reserve_ballot, limit, &keep);
     if (!r.ok) return r;
     while (block->num_vtx > keep) {
         r = research_template_drop_last(tmpl);
         if (!r.ok) return r;
     }
     size_t reserved;
-    r = research_reserved_size(block, ep.solution_width, reserve_ballot, &reserved);
+    r = research_reserved_size(block, ep.solution_width, reserve_ballot, limit, &reserved);
     return r.ok ? ballot_update_merkle(block) : r;
 }
