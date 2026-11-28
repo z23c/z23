@@ -884,6 +884,18 @@ static void reducer_format_on_demand_reject_line(int target_h, char *line,
     }
 }
 
+static bool reducer_read_back_applied(struct main_state *ms, int height,
+                                      const struct uint256 *hash, bool applied,
+                                      struct validation_state *out)
+{
+    if (!reducer_read_back_verdict(ms, height, hash, out)) return false;
+    if (applied) return true;
+    validation_state_invalid(out, false, REJECT_INVALID,
+                             "block-not-finalized-by-reducer",
+                             "private block lacks applied validation evidence");
+    return false;
+}
+
 /* A finalize row may contain the next block hash before that block is applied. */
 static bool reducer_private_rpc_applied(enum reducer_source source, int height,
                                         const struct uint256 *hash)
@@ -992,13 +1004,8 @@ bool reducer_ingest_block(struct chain_activation_controller *ctl,
     zcl_mutex_unlock(&ctl->mutex);
 
     /* (4) Read back the verdict from the freshly-written log rows. */
-    if (reducer_read_back_verdict(ctl->ms, target_h, &block_hash, out)) {
-        if (applied) return true;
-        validation_state_invalid(out, false, REJECT_INVALID,
-                                 "block-not-finalized-by-reducer",
-                                 "private block lacks applied validation evidence");
-        return false;
-    }
+    if (reducer_read_back_applied(ctl->ms, target_h, &block_hash, applied, out))
+        return true;
 
     /* Pending fallback: accept ONLY the live active tip (ingested == tip,
      * snapshotted under the lock) — a fork can't borrow another block's row. */
