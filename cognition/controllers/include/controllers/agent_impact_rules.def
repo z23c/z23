@@ -1433,6 +1433,7 @@ AGENT_IMPACT_RULE("tests/harness/src/test_fast_sync.c", "fast_sync")
 AGENT_IMPACT_RULE("tests/harness/src/test_keystone_utxo_binding.c", "keystone_utxo_binding")
 AGENT_IMPACT_RULE("tests/harness/src/test_loader_owns_seed_gate.c", "loader_owns_seed_gate")
 AGENT_IMPACT_RULE("tests/harness/src/test_mmb.c", "mmb")
+AGENT_IMPACT_RULE("engine/services/src/research_floor.c|engine/services/include/services/research_floor.h|tests/harness/src/test_research_floor.c", "research_floor")
 AGENT_IMPACT_RULE("tests/harness/src/test_utxo_snapshot_loader.c", "utxo_snapshot_loader")
 
 /* wf/operator-ux: native operator-UX commands — explain (topic composers),
