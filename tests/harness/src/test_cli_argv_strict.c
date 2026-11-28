@@ -1719,7 +1719,7 @@ static int cas_test_research_bench_dispatch(void)
         bool before_refused = before_rc == 1 && strstr(out, "Invalid or unsafe testnet profile invocation.");
         char *after[] = {CAS_BIN, flag, "-testnet-profile=ironwood", "sentinel", "-bench-x", NULL};
         int after_rc = cas_run(after, home, out, sizeof out);
-        bool client_only = after_rc != 2 && strstr(out, "error=UNSUPPORTED_PROFILE");
+        bool client_only = after_rc == 2 && strstr(out, "error=UNSUPPORTED_PROFILE");
         char *node[] = {CAS_BIN, flag, "-testnet-profile=ironwood", "-bench-x", NULL};
         int node_rc = cas_run(node, home, out, sizeof out);
         bool node_refused = node_rc == 1 && strstr(out, "Invalid or unsafe testnet profile invocation.");
