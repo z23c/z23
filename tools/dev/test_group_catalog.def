@@ -2136,3 +2136,5 @@ ZCL_TEST_GROUP(bn254_engine_parity)
 ZCL_TEST_GROUP(fleet_goals_release)
 
 ZCL_TEST_GROUP(ironwood_pallas_field)
+
+ZCL_TEST_GROUP(ironwood_pallas_point)

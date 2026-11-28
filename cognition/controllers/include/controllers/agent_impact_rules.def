@@ -3756,3 +3756,5 @@ AGENT_IMPACT_RULE("engine/jobs/include/jobs/ironwood_context_auth.h|engine/jobs/
 AGENT_IMPACT_RULE("engine/services/include/services/ironwood_auth_data_root.h|engine/services/src/ironwood_auth_data_root.c|tests/harness/src/test_ironwood_auth_data_root.c|tests/fixtures/ironwood/postnu63-h1-reward-spend.v6|tests/fixtures/ironwood/postnu63-h1-reward-withdrawal.v6", "ironwood_auth_data_root")
 
 AGENT_IMPACT_RULE("engine/services/src/ironwood_pallas_field.c|engine/services/src/ironwood_pallas_field.h|tests/harness/src/test_ironwood_pallas_field.c|tests/fixtures/ironwood/pallas-fp-differential.txt|tests/fixtures/ironwood/pallas-fp-inversion.txt", "ironwood_pallas_field")
+
+AGENT_IMPACT_RULE("engine/services/src/ironwood_pallas_point.c|engine/services/src/ironwood_pallas_point.h|tests/harness/src/test_ironwood_pallas_point.c|tests/fixtures/ironwood/pallas-point-add.txt", "ironwood_pallas_point")
