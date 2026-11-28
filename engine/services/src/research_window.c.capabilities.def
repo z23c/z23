@@ -1,0 +1,2 @@
+/* purpose: Declare read access for the research ballot window manifest. */
+ZCL_MODULE_CAPABILITY("engine/services/src/research_window.c", CAP_FS_READ, "Reads the research ballot window manifest.")
