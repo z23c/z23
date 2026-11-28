@@ -44,8 +44,9 @@ const struct research_rules_binding *research_rules_binding(void)
 
 size_t research_rules_deposit_violation(const struct block *block)
 {
-    /* Fail closed on a block that cannot be walked. */
-    if (!block || (block->num_vtx && !block->vtx)) return SIZE_MAX;
+    /* Fail closed on a block that cannot be walked: a valid block always
+     * carries at least its coinbase. */
+    if (!block || !block->num_vtx || !block->vtx) return SIZE_MAX;
     for (size_t i = 1; i < block->num_vtx; ++i) {
         const struct transaction *tx = &block->vtx[i];
         if (tx->value_balance < 0 && !(tx->vin && transaction_is_coinbase(tx))) return i + 1;

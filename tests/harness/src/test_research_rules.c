@@ -19,7 +19,7 @@ struct fixture {
     struct research_rules_binding binding;
     struct block_index *index;
     struct block *blocks;
-    int calls, fail, substitute;
+    int calls, fail, fail_above, substitute;
 };
 
 static bool pin_init(struct fixture *f, int start, int window, int cap, int freeze, int count)
@@ -95,6 +95,7 @@ static bool read_block(void *ctx, const struct block_index *bi, struct block *ou
     ++f->calls;
     if (f->fail) return false;
     int h = bi->nHeight;
+    if (f->fail_above && h >= f->fail_above) return false;
     if (f->substitute == h) ++h;
     return block_clone(out, &f->blocks[h]);
 }
@@ -216,6 +217,9 @@ static int deposit_checks(void)
     CHECK(research_rules_deposit_violation(&b) == SIZE_MAX);
     b.vtx = tx;
     CHECK(research_rules_deposit_violation(&b) == 0);
+    b.num_vtx = 0;
+    CHECK(research_rules_deposit_violation(&b) == SIZE_MAX);
+    b.num_vtx = 3;
     tx[1].value_balance = -1;
     CHECK(research_rules_deposit_violation(&b) == 2);
     tx[1].value_balance = 1; tx[2].value_balance = -1;
@@ -380,6 +384,10 @@ int test_research_rules(void)
     CHECK(expect_state(&f, 125, true, false) == 0);
     CHECK(expect_state(&f, 126, true, false) == 0);
     CHECK(expect_state(&f, 399, true, false) == 0);
+    /* Ancestors above the window are linked by the index, never read. */
+    f.fail_above = f.pin.start + f.pin.window;
+    CHECK(expect_state(&f, 399, true, false) == 0);
+    f.fail_above = 0;
     CHECK(tracker_check(&f) == 0);
     CHECK(failure_checks(&f) == 0);
     CHECK(deposit_checks() == 0);

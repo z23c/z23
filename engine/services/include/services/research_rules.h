@@ -49,8 +49,8 @@ const struct research_rules_binding *research_rules_binding(void);
 /* The frozen deposit rule: every non-coinbase transaction keeps
  * value_balance >= 0. Withdrawals, migrations and miner rewards stay allowed.
  * Returns 0 when `block` obeys it, otherwise the 1-based position of its
- * first offending transaction. A NULL block, or one whose transaction array
- * is missing, reports SIZE_MAX: fail closed. */
+ * first offending transaction. A NULL block, an empty one, or one without
+ * a transaction array reports SIZE_MAX: fail closed. */
 size_t research_rules_deposit_violation(const struct block *block);
 
 /* Result codes of the resolvers below. The message explains the cause. */
@@ -69,6 +69,11 @@ enum research_rules_code {
  * equals `*bi->phashBlock`, and `domain_consensus_check_block_merkle_root`
  * accepts `blk`, which binds its transactions to the hashed header. A header
  * alone authenticates nothing: the ballots are in the coinbase.
+ *
+ * Ancestors between the window and the parent are not read: they are linked
+ * by the index (`pprev`, one height per block), which this node sets only
+ * from an authenticated header's hashPrevBlock. A caller that links index
+ * entries by hand keeps that invariant itself.
  *
  * Supply the complete block for one ancestor. `out` is initialized by the
  * caller with block_init and owned by the caller. Return false when the body
@@ -90,7 +95,8 @@ typedef bool (*research_rules_read_fn)(void *ctx, const struct block_index *bi,
  * Unknown entries are tallied but enforce nothing; locked-in or active unknown
  * entries return RESEARCH_RULES_UNAVAILABLE naming the slot. Voting or expired
  * unknown entries change nothing. Window bodies are read only when a known
- * entry reaches activation or an unknown entry can first lock in. On success
+ * entry reaches activation or an unknown entry can first lock in, and the
+ * ancestry is walked only then. On success
  * `*out` is written; on failure it is untouched. */
 struct zcl_result research_rules_for_parent(const struct research_rules_binding *binding,
     const struct block_index *parent, research_rules_read_fn read, void *read_ctx,
