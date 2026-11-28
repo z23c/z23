@@ -34,6 +34,9 @@
  *   - bounded in steady state: no full-table counts or automatic rebuilds.
  *   - fail-closed: missing causal history quarantines the derived mirror for
  *     explicit recovery instead of repeatedly scanning millions of rows.
+ *   - a detected authority rewind queues the existing verified operator
+ *     rebuild on the mirror thread, at most once per minute per instance.
+ *     Until its verified commit succeeds, quarantine and old rows remain.
  *
  * Drift is measured only from the authoritative frontier and durable cursor;
  * a healthy equal-frontier pass is O(1).
@@ -157,6 +160,7 @@ struct utxo_mirror_sync_service {
     /* Operator rebuild job record (see utxo_mirror_rebuild_request). */
     pthread_mutex_t job_mutex;
     struct utxo_mirror_rebuild_job job;
+    _Atomic int64_t auto_rewind_last_ms; /* monotonic; zero means never */
 };
 
 /* Global pointer for RPC/native/diagnostics access. Set by boot, NULL before. */
@@ -239,6 +243,10 @@ int64_t utxo_mirror_rebuild_now_reason(struct utxo_mirror_sync_service *svc,
  * running (nothing queued); -1 when no mirror thread is running to serve it. */
 int utxo_mirror_rebuild_request(struct utxo_mirror_sync_service *svc,
                                 uint64_t *id_out);
+
+/* Schedule a quarantined authority rewind, respecting the per-instance window.
+ * The job always uses the same authority-verified path as operator repair. */
+void utxo_mirror_rewind_request_if_due(struct utxo_mirror_sync_service *svc);
 
 /* Copy the current job record (consistent snapshot). */
 void utxo_mirror_rebuild_job_snapshot(struct utxo_mirror_sync_service *svc,

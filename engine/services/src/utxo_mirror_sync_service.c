@@ -895,18 +895,16 @@ static bool mirror_rebuild_and_advance_lane(struct node_db *ndb, void *ctx)
         return false;
     }
 
-    atomic_store(&r->svc->mirror_health, UTXO_MIRROR_AUDITING);
+    if (!r->prior_quarantine)
+        atomic_store(&r->svc->mirror_health, UTXO_MIRROR_AUDITING);
     int32_t snap_h = r->frontier;
     r->written = mirror_rebuild_from_coins_kv(ndb, &snap_h,
                                               &r->svc->stop_requested, r->operator_repair,
                                               r->reason, sizeof(r->reason));
     if (mirror_rebuild_left_unchanged(r->written)) {
-        /* Stopped or refused before any write (shutdown, RAM overlay, failed
-         * authority proof): the mirror is
-         * unchanged, so restore HEALTHY — a stop is not corruption and must
-         * never quarantine. The service thread exits on the same flag; the
-         * next pass (or next boot) retries the rebuild. */
-        atomic_store(&r->svc->mirror_health, UTXO_MIRROR_HEALTHY);
+        /* A stopped or overlay-refused rebuild leaves prior health unchanged. */
+        atomic_store(&r->svc->mirror_health, r->prior_quarantine
+                     ? UTXO_MIRROR_QUARANTINED : UTXO_MIRROR_HEALTHY);
         return false;
     }
     if (r->written < 0) {
@@ -949,10 +947,14 @@ static bool mirror_sync_ndb_unavailable(
 }
 
 static bool mirror_sync_pass_suspended(
-    const struct utxo_mirror_sync_service *svc)
+    struct utxo_mirror_sync_service *svc)
 {
-    if (atomic_load(&svc->mirror_health) == UTXO_MIRROR_QUARANTINED)
+    if (atomic_load(&svc->mirror_health) == UTXO_MIRROR_QUARANTINED) {
+        if ((atomic_load(&svc->quarantine_cause_state) & UINT64_C(3)) ==
+            UTXO_MIRROR_CAUSE_AUTHORITY_REWIND)
+            utxo_mirror_rewind_request_if_due(svc);
         return true;
+    }
     /* During a from-genesis refold the coins_kv frontier climbs every pass, so
      * drift is true on every tick and this would DELETE+reinsert the ENTIRE
      * mirror (O(total_coins)) every 5s — quadratic against fold progress. The
@@ -1071,13 +1073,13 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
          * representation difference. The forward delta journal has already
          * discarded the losing branch at this point, so decrementing the
          * mirror marker would bless stale rows. Keep the projection frozen
-         * until an owner-gated rebuild from a point-in-time authority copy is
-         * available. */
+         * until a verified rebuild from a point-in-time authority copy commits. */
         mirror_record_cause(svc, UTXO_MIRROR_CAUSE_AUTHORITY_REWIND);
         atomic_store(&svc->mirror_health, UTXO_MIRROR_QUARANTINED);
         atomic_fetch_add(&svc->quarantines_total, 1);
         atomic_store(&svc->last_quarantine_unix,
                      platform_time_wall_unix());
+        utxo_mirror_rewind_request_if_due(svc);
         LOG_RETURN(-1, "utxo_mirror",
                    "run_once: mirror cursor=%lld is ahead of next-height "
                    "authority frontier=%d after an authority rewind; mirror "
@@ -1097,6 +1099,8 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
         atomic_fetch_add(&svc->quarantines_total, 1);
         atomic_store(&svc->last_quarantine_unix,
                      platform_time_wall_unix());
+        if (changed)
+            utxo_mirror_rewind_request_if_due(svc);
         LOG_RETURN(-1, "utxo_mirror",
                    "mirror branch identity at cursor=%lld: %s; "
                    "quarantined without changing rows or cursor",
