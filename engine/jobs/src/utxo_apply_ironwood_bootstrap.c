@@ -258,6 +258,17 @@ static bool bootstrap_existing_marker_valid(sqlite3 *db,
         (marker_matches(&open->marker, parent) || marker_matches(&open->marker, old_parent)) &&
         ironwood_checkpoint_refresh(db, &open->store);
 }
+static enum ironwood_bootstrap_result bootstrap_open_prefix(sqlite3 *db,
+    const struct block_index *parent, struct bootstrap_open *open)
+{
+    if (bootstrap_existing_complete(&open->store, db, parent)) return IRONWOOD_BOOTSTRAP_DONE;
+    if (!ironwood_checkpoint_refresh(db, &open->store) ||
+        !ironwood_checkpoint_progress(&open->store, &open->tip, &open->generation) ||
+        open->tip >= parent->nHeight) return IRONWOOD_BOOTSTRAP_ERROR;
+    open->marker = (struct bootstrap_marker){ .height = parent->nHeight,
+        .hash = *parent->phashBlock, .generation = open->generation };
+    return marker_write(db, &open->marker) ? IRONWOOD_BOOTSTRAP_MORE : IRONWOOD_BOOTSTRAP_ERROR;
+}
 static enum ironwood_bootstrap_result bootstrap_open_store(sqlite3 *db, uint64_t epoch,
     const struct block_index *parent, const struct block_index *old_parent,
     const struct ironwood_bootstrap_cursor *in, struct bootstrap_open *open)
@@ -268,15 +279,11 @@ static enum ironwood_bootstrap_result bootstrap_open_store(sqlite3 *db, uint64_t
     enum ironwood_checkpoint_probe_result probe = ironwood_checkpoint_probe(db);
     if (probe == IRONWOOD_CHECKPOINT_PROBE_ERROR) return IRONWOOD_BOOTSTRAP_ERROR;
     if (have && same_cursor(in, db, epoch, &open->marker)) open->store = in->storage;
+    if (!have && in->active && in->db == db && in->epoch == epoch)
+        return IRONWOOD_BOOTSTRAP_ERROR;
     if (!have && probe == IRONWOOD_CHECKPOINT_PRESENT) {
-        if (bootstrap_existing_complete(&open->store, db, parent))
-            return IRONWOOD_BOOTSTRAP_DONE;
-        if (!ironwood_checkpoint_refresh(db, &open->store) ||
-            !ironwood_checkpoint_progress(&open->store, &open->tip, &open->generation) ||
-            open->tip >= parent->nHeight) return IRONWOOD_BOOTSTRAP_ERROR;
-        open->marker = (struct bootstrap_marker){ .height = parent->nHeight,
-            .hash = *parent->phashBlock, .generation = open->generation };
-        if (!marker_write(db, &open->marker)) return IRONWOOD_BOOTSTRAP_ERROR;
+        enum ironwood_bootstrap_result r = bootstrap_open_prefix(db, parent, open);
+        if (r != IRONWOOD_BOOTSTRAP_MORE) return r;
         have = true;
     }
     if (!have) {

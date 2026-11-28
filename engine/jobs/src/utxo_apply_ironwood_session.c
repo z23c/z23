@@ -221,6 +221,17 @@ static bool bootstrap_snapshot_matches(struct ironwood_checkpoint_session *snaps
         row.payload_size == size && !memcmp(row.payload, bytes, size);
 }
 
+static enum utxo_ironwood_result checkpoint_prefix_status(const struct block_index *parent)
+{
+    int64_t checkpoint_tip, generation;
+    if (!ironwood_checkpoint_progress(&store, &checkpoint_tip, &generation))
+        return UTXO_IRONWOOD_LOCAL_ERROR;
+    if (checkpoint_tip < parent->nHeight) {
+        atomic_store(&bootstrap_requested, true);
+        return UTXO_IRONWOOD_HISTORY_INCOMPLETE;
+    }
+    return UTXO_IRONWOOD_OK;
+}
 static enum utxo_ironwood_result recover_parent(const struct block_index *parent,
     ironwood_history_reader_fn reader, const char *datadir, void *user)
 {
@@ -236,13 +247,8 @@ static enum utxo_ironwood_result recover_parent(const struct block_index *parent
         bootstrap_snapshot_matches(&snapshot, &completed, &frontier)) {
         store = snapshot; verified = completed; end_replay(); return UTXO_IRONWOOD_OK;
     }
-    int64_t checkpoint_tip, generation;
-    if (!ironwood_checkpoint_progress(&store, &checkpoint_tip, &generation))
-        return UTXO_IRONWOOD_LOCAL_ERROR;
-    if (checkpoint_tip < parent->nHeight) {
-        atomic_store(&bootstrap_requested, true);
-        return UTXO_IRONWOOD_HISTORY_INCOMPLETE;
-    }
+    enum utxo_ironwood_result status = checkpoint_prefix_status(parent);
+    if (status != UTXO_IRONWOOD_OK) return status;
     if (!slots || replay.parent != parent || !uint256_eq(&replay.parent_hash, parent->phashBlock)) {
         if (!start_replay(parent)) return UTXO_IRONWOOD_LOCAL_ERROR;
     }
