@@ -412,7 +412,8 @@ ZCL_BLOCKER_DECISION(utxo_apply.ironwood,
     "a successful preparation clears the hold. If full validation mode is "
     "disabled, select a fully validated mode. If authorization evidence is "
     "not implemented, wait for a reviewed implementation before advancing "
-    "the private chain. Investigate unavailable or inconsistent history "
-    "using the separate fatal diagnostic; do not treat a local integrity "
-    "failure as proof that a network block is invalid. No automatic data "
+    "the private chain. Restore access to missing canonical block bodies. "
+    "Inspect the separate fatal diagnostic if a stored checkpoint or body "
+    "contradicts verified history; do not treat a local integrity failure as "
+    "proof that a network block is invalid. No automatic data "
     "repair or consensus bypass is provided.")
