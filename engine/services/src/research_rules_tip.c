@@ -3,7 +3,6 @@
 #include "services/research_rules_tip.h"
 #include "services/chain_state_service.h"
 #include "services/research_rules.h"
-#include "primitives/transaction.h"
 #include "platform/time_compat.h"
 #include "support/log_throttle.h"
 #include "util/log_macros.h"
@@ -47,10 +46,4 @@ struct research_tip_rules research_rules_tip(void)
      * across it (the repository snapshot contract forbids that lock edge). */
     struct block_index *tip = chain ? active_chain_tip(chain) : NULL;
     return research_rules_tip_for_parent(tip);
-}
-
-bool research_tip_deposit_frozen(struct research_tip_rules rules,
-                                 const struct transaction *tx)
-{
-    return rules.freeze && tx && tx->value_balance < 0;
 }
