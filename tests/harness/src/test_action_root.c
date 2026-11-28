@@ -3256,6 +3256,16 @@ static void observation_chain_cleanup(const char *outputs)
     (void)rmdir(outputs);
 }
 
+static void observation_chain_diagnostic(bool linked, bool began, bool compiled,
+                                         bool finished,
+                                         const struct zcl_action_root_result *r)
+{
+    if (!finished)
+        printf("    stable chain: linked=%d begin=%d compile=%d finish=%d "
+               "miss=%s detail=%s\n", linked, began, compiled, finished,
+               r->miss, r->why);
+}
+
 static void observation_driver_chain(struct observation_fixture *fixture)
 {
     struct zcl_compile_observation *observation = NULL;
@@ -3286,10 +3296,7 @@ static void observation_driver_chain(struct observation_fixture *fixture)
     bool compiled = began && observation_compile(observation);
     bool finished = compiled &&
                     zcl_compile_observation_finish(observation, true, &result);
-    if (!finished)
-        printf("    stable chain: linked=%d begin=%d compile=%d finish=%d "
-               "miss=%s detail=%s\n", linked, began, compiled, finished,
-               result.miss, result.why);
+    observation_chain_diagnostic(linked, began, compiled, finished, &result);
     AR_CHECK("observation accepts a stable compiler symlink chain",
              finished);
     zcl_action_root_result_free(&result);
