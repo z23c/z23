@@ -374,7 +374,7 @@ static bool first_transaction(struct session_fixture *f)
         p.checkpoint.count != 4 || !utxo_ironwood_session_publish(&p) || !sql(f->db, "COMMIT")) return false;
     return true;
 }
-static bool cold_replay(struct session_fixture *f)
+static bool cold_replay_with(struct session_fixture *f, int expected_calls)
 {
     utxo_ironwood_session_reset();
     memset(f->reads, 0, sizeof f->reads);
@@ -387,9 +387,49 @@ static bool cold_replay(struct session_fixture *f)
         r = session_prepare(f, 3, &p);
         if (r != UTXO_IRONWOOD_OK && memcmp(&p, &before, sizeof p)) return false;
     }
-    return r == UTXO_IRONWOOD_OK && calls == 6 && p.checkpoint.count == 6 &&
+    return r == UTXO_IRONWOOD_OK && calls == expected_calls && p.checkpoint.count == 6 &&
         f->reads[0] == 1 && f->reads[1] == 1 && f->reads[2] == 1 &&
         utxo_ironwood_session_publish(&p) && sql(f->db, "ROLLBACK");
+}
+static bool cold_replay_one_step(struct session_fixture *f)
+{
+    utxo_ironwood_session_test_step_budget(1);
+    return cold_replay_with(f, 6);
+}
+/* Wall time is not under test in the unit cases: the real-node group
+ * measures the default slice. These cases pin the slice open. */
+static bool cold_replay_one_call(struct session_fixture *f)
+{
+    utxo_ironwood_session_test_step_budget(1024);
+    utxo_ironwood_session_test_soft_slice_us(INT64_MAX);
+    return cold_replay_with(f, 1);
+}
+static bool cold_replay_zero_slice(struct session_fixture *f)
+{
+    utxo_ironwood_session_test_soft_slice_us(0);
+    return cold_replay_with(f, 6);
+}
+static bool missing_body_waits(struct session_fixture *f)
+{
+    utxo_ironwood_session_test_soft_slice_us(INT64_MAX);
+    utxo_ironwood_session_test_step_budget(1024);
+    utxo_ironwood_session_reset();
+    memset(f->reads, 0, sizeof f->reads);
+    if (!sql(f->db, "BEGIN")) return false;
+    struct utxo_ironwood_pending p, before;
+    memset(&p, 0xa5, sizeof p); memcpy(&before, &p, sizeof p);
+    f->missing = true; f->missing_height = 2;
+    if (session_prepare(f, 3, &p) != UTXO_IRONWOOD_HISTORY_INCOMPLETE ||
+        memcmp(&p, &before, sizeof p)) return false;
+    f->missing = false;
+    /* The reader counts the refused read: height 2 is tried once while
+     * missing, then read once. Heights 0 and 1 are not read again. */
+    bool ok = session_prepare(f, 3, &p) == UTXO_IRONWOOD_OK &&
+        f->reads[0] == 1 && f->reads[1] == 1 && f->reads[2] == 2 &&
+        utxo_ironwood_session_publish(&p) && sql(f->db, "ROLLBACK");
+    /* later cases must read every body */
+    f->missing = false;
+    return ok;
 }
 static bool table_exists(sqlite3 *db, const char *name)
 {
@@ -435,6 +475,7 @@ static bool partial_populated_refused(struct session_fixture *f)
 }
 static bool corruption_refused(struct session_fixture *f)
 {
+    f->missing = false;
     utxo_ironwood_session_reset();
     if (!sql(f->db, "BEGIN") || !sql(f->db, "UPDATE ironwood_checkpoints SET root=zeroblob(32) WHERE height=1")) return false;
     struct utxo_ironwood_pending p, before;
@@ -447,7 +488,11 @@ int test_utxo_apply_ironwood_session(void)
     struct session_fixture f = {0};
     const struct { const char *name; bool (*run)(struct session_fixture *); } cases[] = {
         {"fixture", fixture_init}, {"indexed history", indexed_history_cases}, {"bootstrap restart", bootstrap_restart}, {"bootstrap retarget", bootstrap_retarget}, {"bootstrap corrupted payload", bootstrap_payload_corruption}, {"bootstrap rollback retry", bootstrap_rollback_retry}, {"bootstrap marker deleted", bootstrap_marker_deleted}, {"pending bootstrap", pending_bootstrap_refusal}, {"readonly", readonly_refusal}, {"genesis", genesis_cases},
-        {"first transaction", first_transaction}, {"cold replay", cold_replay},
+        {"first transaction", first_transaction},
+        {"cold replay one step per call", cold_replay_one_step},
+        {"cold replay one call", cold_replay_one_call},
+        {"zero slice one step per call", cold_replay_zero_slice},
+        {"missing body waits then resumes", missing_body_waits},
         {"partial empty", partial_empty_refused}, {"partial populated", partial_populated_refused},
         {"corruption", corruption_refused},
     };
@@ -455,6 +500,8 @@ int test_utxo_apply_ironwood_session(void)
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
         if (!cases[i].run(&f)) { fprintf(stderr, "Ironwood session: %s failed\n", cases[i].name); ok = false; break; }
     }
+    utxo_ironwood_session_test_step_budget(1024);
+    utxo_ironwood_session_test_soft_slice_us(100000);
     utxo_ironwood_session_reset();
     if (f.db && sqlite3_close(f.db) != SQLITE_OK) ok = false;
     for (size_t i = 0; i < 4; ++i) block_free(&f.bodies[i]);

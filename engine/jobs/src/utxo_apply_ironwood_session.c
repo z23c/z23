@@ -10,6 +10,7 @@
 #include "primitives/block.h"
 #include "core/serialize.h"
 #include "storage/repair_marker.h"
+#include "platform/time_compat.h"
 #include "services/ironwood_resident_params.h"
 #include <sqlite3.h>
 #include <stdatomic.h>
@@ -27,6 +28,18 @@ static struct ironwood_history_cursor replay;
 static const struct block_index **slots;
 static struct ironwood_history_event verified;
 
+/* One prepare call replays at most this many ancestry links and bodies; a
+ * longer replay resumes at the next call from the kept cursor. After a
+ * process start the first new block replays from genesis, and one step per
+ * stage tick left a restarted node idle for minutes. */
+#define UTXO_IRONWOOD_REPLAY_STEP_BUDGET 1024u
+static unsigned replay_step_budget = UTXO_IRONWOOD_REPLAY_STEP_BUDGET;
+/* After the first step the loop also stops when one soft time slice is spent
+ * (the bootstrap slice), so one prepare call holds the caller's stage
+ * transaction for at most one slice plus one step, whatever a body costs. */
+#define UTXO_IRONWOOD_REPLAY_SOFT_SLICE_US 100000
+static int64_t replay_soft_slice_us = UTXO_IRONWOOD_REPLAY_SOFT_SLICE_US;
+
 static void end_replay(void)
 {
     free(slots);
@@ -41,6 +54,17 @@ void utxo_ironwood_session_reset(void)
     store = (struct ironwood_checkpoint_session){0};
     verified = (struct ironwood_history_event){0};
 }
+
+#ifdef ZCL_TESTING
+void utxo_ironwood_session_test_step_budget(unsigned steps)
+{
+    replay_step_budget = steps ? steps : 1;
+}
+void utxo_ironwood_session_test_soft_slice_us(int64_t us)
+{
+    replay_soft_slice_us = us;
+}
+#endif
 
 static bool genesis_matches(const struct block_index *bi)
 {
@@ -160,17 +184,19 @@ static enum utxo_ironwood_result resume_replay(const struct block_index *parent,
 {
     struct ironwood_history_cursor next;
     struct ironwood_history_event event = {0};
-    if (replay.scanning && parent->nHeight == 0) {
-        if (!utxo_ironwood_history_step(&replay, reader, datadir, user, &next, &event).ok)
-            return UTXO_IRONWOOD_LOCAL_ERROR;
+    int64_t started = platform_time_monotonic_us();
+    for (unsigned steps = 0; ; ++steps) {
+        struct zcl_result step =
+            utxo_ironwood_history_step(&replay, reader, datadir, user, &next, &event);
+        if (!step.ok) return step.code == UTXO_IRONWOOD_HISTORY_BODY_MISSING ?
+            UTXO_IRONWOOD_HISTORY_INCOMPLETE : UTXO_IRONWOOD_LOCAL_ERROR;
+        if (event.available && !matches_row(&event)) return UTXO_IRONWOOD_LOCAL_ERROR;
         replay = next;
+        if (next.complete) break;
+        if (steps + 1 >= replay_step_budget ||
+            platform_time_monotonic_us() - started >= replay_soft_slice_us)
+            return UTXO_IRONWOOD_HISTORY_INCOMPLETE;
     }
-    struct zcl_result step = utxo_ironwood_history_step(&replay, reader, datadir, user, &next, &event);
-    if (!step.ok) return step.code == UTXO_IRONWOOD_HISTORY_BODY_MISSING ?
-        UTXO_IRONWOOD_HISTORY_INCOMPLETE : UTXO_IRONWOOD_LOCAL_ERROR;
-    if (event.available && !matches_row(&event)) return UTXO_IRONWOOD_LOCAL_ERROR;
-    replay = next;
-    if (!next.complete) return UTXO_IRONWOOD_HISTORY_INCOMPLETE;
     if (!event.available || event.height != parent->nHeight ||
         !uint256_eq(&event.block_hash, parent->phashBlock)) return UTXO_IRONWOOD_LOCAL_ERROR;
     verified = event;
