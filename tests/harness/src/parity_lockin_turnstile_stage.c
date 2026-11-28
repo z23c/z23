@@ -408,6 +408,15 @@ static bool pt_anchored_h1(sqlite3 *db, const struct uint256 *parent, bool *acce
     return ok;
 }
 
+static bool pt_genesis_matches(sqlite3 *db)
+{
+    bool known = false, found = false;
+    int64_t ironwood = -1;
+    return pt_pool_is(db, 0, 0, 0) &&
+           shielded_pool_kv_get_ironwood(db, 0, &ironwood, &known, &found) &&
+           found && known && ironwood == 0;
+}
+
 static int pt_research_genesis_anchor(void)
 {
     int failures = 0;
@@ -425,8 +434,7 @@ static int pt_research_genesis_anchor(void)
         PT_CHECK("H1: foreign parent cannot seed totals", pt_anchored_h1(db, &other, &accepted) && !accepted &&
                  shielded_pool_kv_get_ironwood(db,0,&total,&known,&found) && !found);
         PT_CHECK("H1: pinned parent recovers all genesis totals", pt_anchored_h1(db,genesis,&accepted) && accepted &&
-                 pt_pool_is(db,0,0,0) && shielded_pool_kv_get_ironwood(db,0,&total,&known,&found) &&
-                 found && known && total==0);
+                 pt_genesis_matches(db));
         PT_CHECK("H1: rejected transaction rolls back genesis totals", sqlite3_exec(db,"ROLLBACK",NULL,NULL,NULL)==SQLITE_OK &&
                  shielded_pool_kv_get_ironwood(db,0,&total,&known,&found) && !found);
         PT_CHECK("H1: existing disagreement survives refusal", sqlite3_exec(db,"BEGIN",NULL,NULL,NULL)==SQLITE_OK &&

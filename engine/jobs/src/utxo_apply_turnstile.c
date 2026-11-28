@@ -186,6 +186,16 @@ static bool ts_research_genesis_pools(sqlite3 *db,
            shielded_pool_kv_put_ironwood(db, 0, ironwood);
 }
 
+static bool ts_prepare_parent(sqlite3 *db, int64_t height, const struct block *blk)
+{
+    if (height != 1 || !blk) return true;
+    const struct chain_research_descriptor *profile = chain_research_profile_current();
+    if (!profile || profile->id != CHAIN_RESEARCH_IRONWOOD) return true;
+    const struct uint256 *parent = &blk->header.hashPrevBlock;
+    if (!uint256_eq(parent, &profile->chain->consensus.hashGenesisBlock)) return true;
+    return ts_research_genesis_pools(db, profile, parent);
+}
+
 bool utxo_apply_turnstile_stage_check(
     sqlite3 *db, const struct block *blk, int64_t next_h,
     const struct uint256 *hash, struct delta_summary *summary,
@@ -194,11 +204,8 @@ bool utxo_apply_turnstile_stage_check(
     struct ts_totals parent = { 0, 0 };
     struct ts_totals blockv = { 0, 0 };
     bool parent_known = true;
-    const struct chain_research_descriptor *profile = chain_research_profile_current();
     pending->write = false;
-    if (next_h == 1 && profile && profile->id == CHAIN_RESEARCH_IRONWOOD &&
-        blk && uint256_eq(&blk->header.hashPrevBlock, &profile->chain->consensus.hashGenesisBlock) &&
-        !ts_research_genesis_pools(db, profile, &blk->header.hashPrevBlock))
+    if (!ts_prepare_parent(db, next_h, blk))
         return false; // raw-return-ok:callee-logged-research-genesis-pool-failure
     if (next_h > 0 &&
         !shielded_pool_kv_get(db, next_h - 1, &parent.sprout,
