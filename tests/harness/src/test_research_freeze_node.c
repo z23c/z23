@@ -10,6 +10,7 @@ static int rf_refused_ballot_is_prompt(struct rf_fixture *f)
 {
     RF_CHECK(rf_height(f, 119));
     long start = rnf_now_ms();
+    f->mine_calls = 0;
     bool ok = rf_mine(f, 1, true);
     long elapsed = rnf_now_ms() - start;
     printf("refused ballot helper elapsed_ms=%ld reply=%s\n", elapsed, f->mine_error);
@@ -17,7 +18,7 @@ static int rf_refused_ballot_is_prompt(struct rf_fixture *f)
     RF_CHECK(strstr(f->mine_error, "Template height outside the pinned voting window"));
     RF_CHECK(elapsed >= 0 && elapsed < RNF_RECONCILE_MS / 20);
     RF_CHECK(rf_height(f, 119));
-    RF_CHECK(!rf_mine_progress(119, 119, f->mine_error));
+    RF_CHECK(f->mine_calls == 1);
     return 0;
 }
 
@@ -207,7 +208,9 @@ static int rf_restart(struct rf_fixture *f)
     RF_CHECK(rf_height(f, 147));
     RF_CHECK(rf_status(f, 147, 19, "active"));
     rnf_node_stop(&f->node);
-    RF_CHECK(rf_start(f) && rf_ready(f));
+    const char *step = !rf_start(f) ? "restart start" : rf_ready(f) ? NULL : "restart ready";
+    if (step) fprintf(stderr, "research_freeze_node: setup step failed: %s\n", step);
+    RF_CHECK(step == NULL);
     RF_CHECK(rf_refuse_send(f, 147) == 0);
     RF_CHECK(rf_withdraw(f, 147, f->restart_shielded) == 0);
     return 0;
@@ -256,7 +259,9 @@ static int rf_wallet_journey(struct rf_fixture *f)
 static int rf_run(int (*test)(struct rf_fixture *))
 {
     struct rf_fixture f = {0};
-    int failures = !rf_setup(&f);
+    const char *step = rf_setup(&f);
+    int failures = step != NULL;
+    if (step) fprintf(stderr, "research_freeze_node: setup step failed: %s\n", step);
     if (!failures) failures = test(&f);
     if (failures && f.node.work[0]) rnf_log_tail(&f.node);
     rnf_cleanup(&f.node);

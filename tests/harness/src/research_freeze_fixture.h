@@ -14,6 +14,8 @@ struct rf_fixture {
     char address[128], shielded[256], restart_shielded[256];
     char deposit_hex[16384];
     char mine_error[4096];
+    int mine_calls;
+    const char *extra_flag;
 };
 
 static bool rf_file(const char *path, const char *data, size_t len)
@@ -67,11 +69,12 @@ static bool rf_start(struct rf_fixture *f)
         if (fd < 0) _exit(127);
         dup2(fd, 1); dup2(fd, 2); close(fd);
         char *const env[] = {home, "PATH=/usr/bin:/bin", cred, NULL};
-        execle(RNF_BIN, RNF_BIN, "-testnet-profile=ironwood", pin, dd, p2p, rpc, params,
-              "-operator-lane=dev", "-private-listeners", "-bind=127.0.0.1",
-              "-no-tor", "-wallet-no-phrase-backup", "-walletbackup=0",
-              "-nobgvalidation", "-showmetrics=0", "-packagehost=0",
-              "-connect=127.0.0.1:1", (char *)NULL, env);
+        char *const argv[] = {RNF_BIN, "-testnet-profile=ironwood", pin, dd, p2p, rpc, params,
+                              "-operator-lane=dev", "-private-listeners", "-bind=127.0.0.1",
+                              "-no-tor", "-wallet-no-phrase-backup", "-walletbackup=0",
+                              "-nobgvalidation", "-showmetrics=0", "-packagehost=0",
+                              "-connect=127.0.0.1:1", (char *)f->extra_flag, NULL};
+        execve(RNF_BIN, argv, env);
         _exit(127);
     }
     setpgid(pid, pid);
@@ -115,20 +118,22 @@ static bool rf_ready(struct rf_fixture *f)
     return false;
 }
 
-static bool rf_setup(struct rf_fixture *f)
+static const char *rf_setup(struct rf_fixture *f)
 {
-    if (!rnf_setup(&f->node, "research_freeze") ||
-        !f->node.port[0] || !f->node.port[1] ||
+    if (!rnf_setup(&f->node, "research_freeze")) return "fixture";
+    if (!f->node.port[0] || !f->node.port[1] ||
         f->node.port[0] == 28023 || f->node.port[0] == 28033 ||
-        f->node.port[1] == 28023 || f->node.port[1] == 28033 ||
-        !rf_catalog(f) || !rf_start(f) || !rf_ready(f)) return false;
+        f->node.port[1] == 28023 || f->node.port[1] == 28033) return "ports";
+    if (!rf_catalog(f)) return "catalog";
+    if (!rf_start(f)) return "start";
+    if (!rf_ready(f)) return "ready";
     char raw[4096];
     const char *const words[] = {"getnewaddress", NULL};
-    if (rf_rpc(f, words, raw, sizeof(raw))) return false;
+    if (rf_rpc(f, words, raw, sizeof(raw))) return "address";
     raw[strcspn(raw, "\r\n")] = 0;
-    if (!raw[0] || strlen(raw) >= sizeof(f->address)) return false;
+    if (!raw[0] || strlen(raw) >= sizeof(f->address)) return "address";
     strcpy(f->address, raw);
-    return true;
+    return NULL;
 }
 
 static bool rf_get_height(struct rf_fixture *f, int *height)
@@ -183,6 +188,7 @@ static bool rf_mine_batch(struct rf_fixture *f, int *height, int target, bool vo
     snprintf(ballot, sizeof(ballot), "{\"catalog\":\"%s\",\"slots\":[0,1]}", rf_digest);
     const char *const words[] = {"generatetoaddress", n, f->address, vote ? ballot : NULL, NULL};
     long start = rnf_now_ms();
+    f->mine_calls++;
     int rc = rf_rpc(f, words, raw, sizeof(raw));
     printf("mine-call count=%d vote=%d rc=%d elapsed_ms=%ld\n",
            batch, vote, rc, rnf_now_ms() - start);
@@ -195,19 +201,13 @@ static bool rf_mine_batch(struct rf_fixture *f, int *height, int target, bool vo
         return rf_mine_reconcile(f, height, batch_end, last_error);
     if (rc) return false;
     int current;
+    f->mine_calls++;
     if (!rf_get_height(f, &current))
         return rf_mine_reconcile(f, height, batch_end, rc ? last_error : raw);
     if (current > batch_end || current < *height || current != batch_end)
         return false;
     *height = current;
     return true;
-}
-
-static bool rf_mine_progress(int previous, int height, const char *reply)
-{
-    if (height > previous) return true;
-    fprintf(stderr, "mine: %s\n", reply);
-    return false;
 }
 
 static bool rf_mine(struct rf_fixture *f, int count, bool vote)
@@ -219,12 +219,10 @@ static bool rf_mine(struct rf_fixture *f, int count, bool vote)
     int target = height + count;
     long deadline = rnf_now_ms() + RNF_RECONCILE_MS;
     while (height < target && rnf_now_ms() < deadline) {
-        int previous = height;
         if (!rf_mine_batch(f, &height, target, vote, last_error, sizeof(f->mine_error))) {
             fprintf(stderr, "mine: %s\n", last_error);
             return false;
         }
-        if (!rf_mine_progress(previous, height, last_error)) return false;
         deadline = rnf_now_ms() + RNF_RECONCILE_MS;
     }
     int actual;

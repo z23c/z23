@@ -443,6 +443,11 @@ ZCL_TEST_GROUP_BUILD_NEED("test_wallet_e2e_regtest", "build/bin/z23", "z23")
  * (regtest_node_fixture.h) and self-skips where it is absent. */
 ZCL_TEST_GROUP_BUILD_NEED("test_wallet_tx_matrix_regtest", "build/bin/z23", "z23")
 
+/* tests/harness/src/test_research_freeze_node.c drives the built z23 the same way
+ * (research_freeze_fixture.h over regtest_node_fixture.h) and self-skips where it
+ * is absent. */
+ZCL_TEST_GROUP_BUILD_NEED("test_research_freeze_node", "build/bin/z23", "z23")
+
 /* tests/harness/src/test_freebsd_sh.c execs build/bin/fbsh and self-skips
  * where it is absent. The proof's prefork step builds fbsh for every test
  * selection, so only a local run needs this row. */
