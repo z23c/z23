@@ -123,7 +123,11 @@ bool zcl_test_group_catalog_contains(const char *full_id)
 }
 
 /* Groups that hold wall-clock budgets (process-stop budgets in the dev_platform
- * watch-session shards) and so run alone. test_crypto_registry (its timings
+ * watch-session shards) and so run alone. Shard 05 also compiles through a
+ * fixture in the runner's shared test-tmp; other groups creating siblings can
+ * change a compiler-path ancestor during that compile and correctly make its
+ * identity refuse. The pre-pass isolates it from this runner's own pool.
+ * test_crypto_registry (its timings
  * are printed, never asserted), test_character_sheet (pure CPU),
  * test_devagent_ticketkey (no timing assertion) and test_codeindex_scale (its
  * budgets are query and cold-build CPU, not wall time) were here until the
@@ -136,7 +140,8 @@ bool zcl_test_group_catalog_contains(const char *full_id)
 static bool catalog_contention_sensitive(const char *full_id)
 {
     static const char *const groups[] = {
-        "test_dev_platform_shard_02", "test_dev_platform_shard_03"
+        "test_dev_platform_shard_02", "test_dev_platform_shard_03",
+        "test_dev_platform_shard_05"
     };
     for (size_t i = 0; i < sizeof(groups) / sizeof(groups[0]); i++)
         if (strcmp(full_id, groups[i]) == 0) return true;

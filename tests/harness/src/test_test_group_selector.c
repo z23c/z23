@@ -1613,6 +1613,14 @@ static int test_process_sensitive_groups_are_catalog_exclusive(void)
             "test_dev_platform_shard_02"));
         ASSERT(zcl_test_group_requires_exclusive_run(
             "test_dev_platform_shard_03"));
+        /* Shard 05 validates compiler identity against its shared runner
+         * test-tmp path; other pooled fixtures otherwise churn an ancestor. */
+        ASSERT(zcl_test_group_requires_exclusive_run(
+            "test_dev_platform_shard_05"));
+        ASSERT(!zcl_test_group_requires_exclusive_run(
+            "test_dev_platform_shard_04"));
+        ASSERT(!zcl_test_group_requires_exclusive_run(
+            "test_dev_platform_shard_06"));
         /* No timing assertion: these run in the pool, with the runner's
          * one-shot alone rerun as the load safety net. */
         ASSERT(!zcl_test_group_requires_exclusive_run(
