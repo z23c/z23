@@ -675,7 +675,12 @@ static bool ars_cc1_line_sysroot(const char *line, const char *end,
             if (triple_found)
                 return false;
             triple_found = true;
-            linux_target = strstr(word, "-linux-") != NULL;
+            const char *arch_end = strchr(word, '-');
+            const char *vendor_end = arch_end ? strchr(arch_end + 1, '-') : NULL;
+            linux_target = arch_end && arch_end != word && vendor_end &&
+                           vendor_end != arch_end + 1 &&
+                           strncmp(vendor_end + 1, "linux-", 6) == 0 &&
+                           vendor_end[7] != '\0';
             triple_pending = false;
         } else if (pending) {
             if (found || word[0] != '/')
@@ -1216,6 +1221,8 @@ static bool ars_programs_same(struct ars_driver *d,
     d->ask_env = env;
     bool ok = p && ars_programs_ask(d, p, NULL) &&
               memcmp(p->lines_sha3, d->lines_sha3, 32) == 0 &&
+              p->cc1_sysroot_known == d->cc1_sysroot_known &&
+              strcmp(p->cc1_sysroot, d->cc1_sysroot) == 0 &&
               p->backend_n == d->backend_n && p->prefix_n == d->prefix_n;
     for (size_t i = 0; ok && i < p->backend_n; i++)
         ok = strcmp(p->backend[i], d->backend[i]) == 0;

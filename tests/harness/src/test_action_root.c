@@ -2864,6 +2864,9 @@ static void test_cc1_sysroot_parse(void)
         " \"/tool/clang\" \"-cc1\" \"-triple\" "
         "\"x86_64-unknown-linux-gnu\" \"-triple\" "
         "\"arm64-apple-macos\"\n";
+    const char *linux_vendor =
+        " \"/tool/clang\" \"-cc1\" \"-triple\" "
+        "\"x86_64-linux-darwin-gnu\"\n";
     const char *duplicate =
         " \"/tool/clang\" \"-cc1\" \"-isysroot\" \"/SDK/A\" "
         "\"-isysroot\" \"/SDK/B\"\n";
@@ -2887,6 +2890,7 @@ static void test_cc1_sysroot_parse(void)
               zcl_action_root_parse_cc1_sysroot(linux_default, sysroot) &&
               sysroot[0] == '\0' &&
               !zcl_action_root_parse_cc1_sysroot(linux_ambiguous, sysroot) &&
+              !zcl_action_root_parse_cc1_sysroot(linux_vendor, sysroot) &&
               !zcl_action_root_parse_cc1_sysroot(duplicate, sysroot) &&
               !zcl_action_root_parse_cc1_sysroot(relative, sysroot) &&
               !zcl_action_root_parse_cc1_sysroot(two_commands, sysroot) &&
