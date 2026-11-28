@@ -3,6 +3,7 @@
 #include "test/test_core.h"
 
 #include "config/boot_blocktree_cleanup.h"
+#include "chain/chainparams.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -113,6 +114,30 @@ static bool bbc_truncated_path_failed_closed(
            tiny[0] == '\0';
 }
 
+static int bbc_research_deferred(void)
+{
+    int failures = 0;
+    char dir[256], tmp[512], snap[512], tree[512], file[560];
+    if (!test_mkdtemp(dir, sizeof dir, "bbc_research")) return 1;
+    bool made = bbc_make_nested_dir(dir, "chainstate_import_tmp", tmp, sizeof tmp) &&
+                bbc_make_nested_dir(dir, ".legacy_ldb_snap", snap, sizeof snap);
+    bool selected = chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD);
+    struct boot_blocktree_cleanup_result r = boot_blocktree_cleanup_prepare(dir, tree, sizeof tree);
+    int n = snprintf(file, sizeof file, "%s/sub/file.txt", tmp);
+    bool kept_tmp = n > 0 && (size_t)n < sizeof file && access(file, F_OK) == 0;
+    n = snprintf(file, sizeof file, "%s/sub/file.txt", snap);
+    bool kept_snap = n > 0 && (size_t)n < sizeof file && access(file, F_OK) == 0;
+    BBC_CHECK("research preparation retains both scratch trees",
+              made && selected && r.blocktree_path_ready && kept_tmp && kept_snap &&
+              !r.chainstate_import_tmp_removed && !r.legacy_ldb_snap_removed);
+    boot_blocktree_cleanup_after_verified(dir);
+    BBC_CHECK("research verified cleanup removes both scratch trees",
+              access(tmp, F_OK) != 0 && access(snap, F_OK) != 0);
+    chain_params_select(CHAIN_MAIN);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 int test_boot_blocktree_cleanup(void)
 {
     int failures = 0;
@@ -203,5 +228,6 @@ int test_boot_blocktree_cleanup(void)
                   bbc_truncated_path_failed_closed(r, tiny));
     }
 
+    failures += bbc_research_deferred();
     return failures;
 }

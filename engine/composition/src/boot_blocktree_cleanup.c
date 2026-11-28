@@ -3,6 +3,7 @@
 #include "config/boot_blocktree_cleanup.h"
 
 #include "config/file_ops.h"
+#include "chain/chainparams.h"
 
 #include <stdio.h>
 #include <sys/stat.h>
@@ -42,6 +43,29 @@ static bool boot_remove_stranded_scratch_dir(const char *path)
     return removed;
 }
 
+static void boot_remove_stranded_scratch(const char *datadir,
+                                         struct boot_blocktree_cleanup_result *result)
+{
+    char path[1100];
+    if (!boot_blocktree_path(path, sizeof(path), datadir, "chainstate_import_tmp")) {
+        result->truncated_path = true;
+        return;
+    }
+    result->chainstate_import_tmp_removed = boot_remove_stranded_scratch_dir(path);
+    if (!boot_blocktree_path(path, sizeof(path), datadir, ".legacy_ldb_snap")) {
+        result->truncated_path = true;
+        return;
+    }
+    result->legacy_ldb_snap_removed = boot_remove_stranded_scratch_dir(path);
+}
+
+void boot_blocktree_cleanup_after_verified(const char *datadir)
+{
+    if (!chain_research_profile_current()) return;
+    struct boot_blocktree_cleanup_result result = {0};
+    boot_remove_stranded_scratch(datadir, &result);
+}
+
 struct boot_blocktree_cleanup_result
 boot_blocktree_cleanup_prepare(const char *datadir,
                                char *blocktree_path,
@@ -77,20 +101,8 @@ boot_blocktree_cleanup_prepare(const char *datadir,
     }
     result.block_index_lock_removed = boot_remove_lock_if_present(path);
 
-    if (!boot_blocktree_path(path, sizeof(path), datadir,
-                             "chainstate_import_tmp")) {
-        result.truncated_path = true;
-        return result;
-    }
-    result.chainstate_import_tmp_removed =
-        boot_remove_stranded_scratch_dir(path);
-
-    if (!boot_blocktree_path(path, sizeof(path), datadir,
-                             ".legacy_ldb_snap")) {
-        result.truncated_path = true;
-        return result;
-    }
-    result.legacy_ldb_snap_removed = boot_remove_stranded_scratch_dir(path);
+    if (!chain_research_profile_current())
+        boot_remove_stranded_scratch(datadir, &result);
 
     return result;
 }

@@ -10,6 +10,7 @@
 #include "test/test_core.h"
 #include "services/block_index_loader.h"
 #include "config/boot_blkidx_ladder.h"
+#include "config/boot_blocktree_cleanup.h"
 #include "config/boot_internal.h"
 #include "config/boot.h"
 #include "../../../engine/services/src/block_index_flat_internal.h"
@@ -818,6 +819,34 @@ static bool bil_ladder_refuses_unchanged(const char *dir, struct main_state *sta
     return load.genesis_failed && unchanged;
 }
 
+static bool bil_seed_cleanup_scratch(const char *dir, const char *name)
+{
+    char path[512], file[560];
+    if (snprintf(path, sizeof path, "%s/%s", dir, name) >= (int)sizeof path ||
+        snprintf(file, sizeof file, "%s/file", path) >= (int)sizeof file ||
+        mkdir(path, 0700) != 0) return false;
+    FILE *f = fopen(file, "wb");
+    if (!f) return false;
+    bool ok = fputs("preserve", f) >= 0;
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static bool bil_foreign_cleanup_refusal(const char *dir, struct main_state *state,
+                                        const struct chain_params *params)
+{
+    struct bil_file_snapshot before, after;
+    char blocktree[512];
+    if (!bil_seed_cleanup_scratch(dir, "chainstate_import_tmp") ||
+        !bil_seed_cleanup_scratch(dir, ".legacy_ldb_snap") ||
+        !bil_snapshot_take(dir, &before)) return false;
+    struct boot_blocktree_cleanup_result cleanup =
+        boot_blocktree_cleanup_prepare(dir, blocktree, sizeof blocktree);
+    return cleanup.blocktree_path_ready &&
+        bil_ladder_refuses_unchanged(dir, state, params) &&
+        bil_snapshot_take(dir, &after) && bil_snapshot_equal(&before, &after);
+}
+
 static int bil_foreign_flat_refusal(const struct chain_research_descriptor *profile)
 {
     int failures = 0;
@@ -831,7 +860,7 @@ static int bil_foreign_flat_refusal(const struct chain_research_descriptor *prof
     }
     struct block_index_flat_identity identity = {0};
     bool saved = foreign && save_block_index_flat_identity(dir, &src, &identity).ok;
-    bool refused = saved && bil_ladder_refuses_unchanged(dir, &dst, profile->chain);
+    bool refused = saved && bil_foreign_cleanup_refusal(dir, &dst, profile->chain);
     BIL_CHECK("bil: foreign flat genesis refuses without changing any file",
               refused && block_map_find(&dst.map_block_index, &hash));
     main_state_free(&dst); main_state_free(&src);

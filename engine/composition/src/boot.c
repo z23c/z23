@@ -3523,6 +3523,7 @@ static bool boot_seq_load_chain(struct app_context *ctx, struct boot_seq *seq)
 {
     if (!boot_seq_open_coins_state(ctx, seq)) return false;
     if (!boot_seq_load_block_index(ctx, seq)) return false;
+    boot_blocktree_cleanup_after_verified(ctx->datadir);
     if (!flysync_island_boot_after_index(ctx, &g_state)) return false;
     if (!boot_seq_reconcile_chain_state(ctx, seq)) return false;
     if (!boot_seq_load_sapling_tree(ctx)) return false;

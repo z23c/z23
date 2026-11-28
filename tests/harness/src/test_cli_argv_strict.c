@@ -1889,6 +1889,20 @@ static bool cas_research_oneshot(char *const argv[], const char *home,
     return ok;
 }
 
+static bool cas_scratch_make(const char *home, const char *name, char *path, size_t cap)
+{
+    char file[PATH_MAX + 128];
+    int n = snprintf(path, cap, "%s/ironwood-research/%s", home, name);
+    int m = snprintf(file, sizeof file, "%s/file", path);
+    if (n < 0 || (size_t)n >= cap || m < 0 || (size_t)m >= sizeof file ||
+        mkdir(path, 0700) != 0) return false;
+    FILE *f = fopen(file, "w");
+    if (!f) return false;
+    bool ok = fputs("scratch", f) >= 0;
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
 static int cas_test_research_datadir(void)
 {
     int failures = 0;
@@ -1910,9 +1924,13 @@ static int cas_test_research_datadir(void)
         bool explicit_found = p > 0 && (size_t)p < sizeof(parent_flag) &&
             e > 0 && (size_t)e < sizeof(expected) &&
             cas_research_oneshot(explicit_argv, home, expected, out, sizeof(out));
+        char scratch[PATH_MAX + 96], snapshot[PATH_MAX + 96];
+        bool seeded = cas_scratch_make(home, "chainstate_import_tmp", scratch, sizeof scratch) &&
+                      cas_scratch_make(home, ".legacy_ldb_snap", snapshot, sizeof snapshot);
         bool restart_found = cas_research_oneshot(explicit_argv, home, expected, out, sizeof(out));
+        bool cleaned = access(scratch, F_OK) != 0 && access(snapshot, F_OK) != 0;
         (void)test_rm_rf_recursive(home);
-        ASSERT(found && explicit_found && restart_found);
+        ASSERT(found && explicit_found && seeded && restart_found && cleaned);
         PASS();
     } _test_next:;
     return failures;

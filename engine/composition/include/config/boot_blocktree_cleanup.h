@@ -26,6 +26,9 @@ boot_blocktree_cleanup_prepare(const char *datadir,
                                char *blocktree_path,
                                size_t blocktree_path_n);
 
+/* Research nodes call this only after the block-index ladder succeeds. */
+void boot_blocktree_cleanup_after_verified(const char *datadir);
+
 #ifdef __cplusplus
 }
 #endif
