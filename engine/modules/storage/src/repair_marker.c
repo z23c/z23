@@ -19,6 +19,7 @@
 #include "util/safe_alloc.h"
 
 #include <sqlite3.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,15 +76,14 @@ static bool repair_marker_note_stmt(sqlite3 *db, const char *kind,
             "(kind, height, hash, payload, created_at) VALUES(?,?,?,?,?)",
             -1, &st, NULL) != SQLITE_OK)
         return false;  // raw-return-ok:prepare-failure-caller-logs
-    sqlite3_bind_text(st, 1, kind, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(st, 2, height);
-    sqlite3_bind_blob(st, 3, hash32, 32, SQLITE_TRANSIENT);
-    if (payload_len > 0)
-        sqlite3_bind_blob(st, 4, payload, (int)payload_len, SQLITE_TRANSIENT);
-    else
-        sqlite3_bind_null(st, 4);
-    sqlite3_bind_int64(st, 5, repair_marker_now_s());
-    int rc = sqlite3_step(st);  // raw-sql-ok:kernel-primitive
+    bool bound = payload_len <= INT_MAX &&
+        sqlite3_bind_text(st, 1, kind, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_int64(st, 2, height) == SQLITE_OK &&
+        sqlite3_bind_blob(st, 3, hash32, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+        (payload_len ? sqlite3_bind_blob(st, 4, payload, (int)payload_len, SQLITE_TRANSIENT) :
+                       sqlite3_bind_null(st, 4)) == SQLITE_OK &&
+        sqlite3_bind_int64(st, 5, repair_marker_now_s()) == SQLITE_OK;
+    int rc = bound ? sqlite3_step(st) : SQLITE_ERROR;  // raw-sql-ok:kernel-primitive
     sqlite3_finalize(st);
     return rc == SQLITE_DONE;
 }
@@ -98,10 +98,10 @@ static bool repair_marker_forget_stmt(sqlite3 *db, const char *kind,
             "DELETE FROM repair_marker WHERE kind=? AND height=? AND hash=?",
             -1, &st, NULL) != SQLITE_OK)
         return false;  // raw-return-ok:prepare-failure-caller-logs
-    sqlite3_bind_text(st, 1, kind, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(st, 2, height);
-    sqlite3_bind_blob(st, 3, hash32, 32, SQLITE_TRANSIENT);
-    int rc = sqlite3_step(st);  // raw-sql-ok:kernel-primitive
+    bool bound = sqlite3_bind_text(st, 1, kind, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_int64(st, 2, height) == SQLITE_OK &&
+        sqlite3_bind_blob(st, 3, hash32, 32, SQLITE_TRANSIENT) == SQLITE_OK;
+    int rc = bound ? sqlite3_step(st) : SQLITE_ERROR;  // raw-sql-ok:kernel-primitive
     sqlite3_finalize(st);
     return rc == SQLITE_DONE;
 }

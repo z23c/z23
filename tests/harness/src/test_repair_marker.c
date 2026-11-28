@@ -13,6 +13,7 @@
 #include "storage/repair_marker.h"
 
 #include <sqlite3.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -352,9 +353,15 @@ static int rm_check_bind_failure(sqlite3 *db, const uint8_t hash[32])
     int bound = prepared == SQLITE_OK ? sqlite3_bind_text(probe, 1, kind, -1, SQLITE_TRANSIENT) : SQLITE_ERROR;
     sqlite3_finalize(probe);
     bool ok = repair_marker_have(db, kind, 1, hash, &have, NULL, 0, NULL);
+    bool forgotten = repair_marker_forget(db, kind, 1, hash);
+    bool noted = repair_marker_note(db, kind, 2, hash, NULL, 0);
     sqlite3_limit(db, SQLITE_LIMIT_LENGTH, old_limit);
+    uint8_t dummy = 0;
+    bool oversized = repair_marker_note(db, kind, 3, hash, &dummy, (size_t)INT_MAX + 1);
     RM_CHECK("fixture reaches failing bind", prepared == SQLITE_OK && bound != SQLITE_OK);
     RM_CHECK("bind error never looks absent", !ok && !have);
+    RM_CHECK("bind error refuses note and forget", !noted && !forgotten);
+    RM_CHECK("oversized payload refused", !oversized);
     RM_CHECK("marker survives bind error",
         repair_marker_have(db, kind, 1, hash, &have, NULL, 0, NULL) && have);
     return failures;
