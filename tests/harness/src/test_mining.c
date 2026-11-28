@@ -9,6 +9,7 @@
 #include "services/miner_signal_catalog_pin.h"
 #include "base/hex.h"
 #include "core/serialize.h"
+#include "crypto/common.h"
 #include "mining/miner.h"
 #include "primitives/transaction.h"
 #include "chain/chainparams.h"
@@ -449,7 +450,8 @@ static bool mining_h1_wire_case(int32_t overwinter, int32_t sapling,
     cp.consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight = sapling;
     struct main_state ms; main_state_init(&ms);
     struct tx_mempool pool; tx_mempool_init(&pool, 0);
-    struct coins_view_kv backing; coins_view_kv_init(&backing);
+    struct coins_view_kv backing;
+    if (!coins_view_kv_init(&backing)) { tx_mempool_free(&pool); main_state_free(&ms); return false; }
     struct coins_view_cache cache; coins_view_cache_init(&cache, &backing.view);
     struct block_index parent; block_index_init(&parent);
     parent.nHeight = 0; parent.hashBlock.data[0] = 1;
@@ -470,12 +472,10 @@ static bool mining_h1_wire_case(int32_t overwinter, int32_t sapling,
         struct transaction decoded; transaction_init(&decoded);
         ok = transaction_serialize(cb, &wire) && !wire.error && wire.size >= 8;
         if (ok) {
-            uint32_t got = (uint32_t)wire.data[0] | (uint32_t)wire.data[1] << 8 |
-                (uint32_t)wire.data[2] << 16 | (uint32_t)wire.data[3] << 24;
+            uint32_t got = ReadLE32(wire.data);
             ok = got == header;
             if (group) {
-                uint32_t gid = (uint32_t)wire.data[4] | (uint32_t)wire.data[5] << 8 |
-                    (uint32_t)wire.data[6] << 16 | (uint32_t)wire.data[7] << 24;
+                uint32_t gid = ReadLE32(wire.data + 4);
                 ok = ok && gid == group;
             }
         }
