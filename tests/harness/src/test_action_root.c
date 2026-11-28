@@ -3177,12 +3177,14 @@ static void observation_driver_chain(struct observation_fixture *fixture)
 {
     struct zcl_compile_observation *observation = NULL;
     struct zcl_action_root_result result = {0};
-    char driver[PATH_MAX];
-    (void)snprintf(driver, sizeof(driver), "%s/cc", fixture->root);
+    char driver[PATH_MAX], tmp[PATH_MAX], linkdir[PATH_MAX];
+    test_make_tmpdir(tmp, sizeof(tmp), "action_root", "compiler_links");
+    bool canonical = platform_directory_canonical_real(tmp, linkdir, sizeof(linkdir));
+    (void)snprintf(driver, sizeof(driver), "%s/cc", linkdir);
     const char *original = fixture->argv[0];
     char intermediate[PATH_MAX];
-    (void)snprintf(intermediate, sizeof(intermediate), "%s/cc-link", fixture->root);
-    bool linked = symlink(fixture->compiler, intermediate) == 0 &&
+    (void)snprintf(intermediate, sizeof(intermediate), "%s/cc-link", linkdir);
+    bool linked = canonical && symlink(fixture->compiler, intermediate) == 0 &&
                   symlink("cc-link", driver) == 0;
     fixture->argv[0] = driver;
     observation = NULL;
@@ -3207,6 +3209,7 @@ static void observation_driver_chain(struct observation_fixture *fixture)
     fixture->argv[0] = original;
     (void)unlink(driver);
     (void)unlink(intermediate);
+    (void)rmdir(linkdir);
 }
 
 static void observation_output_refusals(struct observation_fixture *fixture)

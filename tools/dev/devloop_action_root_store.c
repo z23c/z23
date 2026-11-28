@@ -2117,13 +2117,17 @@ static bool ars_hook_driver(struct ars_hook *h, const struct ars_compile *k,
     (void)backend;
     return false;
 #else
+    const char *bad = NULL;
     uint8_t links[32], links_after[32];
     if (!ars_exec_paths_stable(k, &h->driver, links)) {
-        ars_miss_set(m, "input_changed_during_compile",
-                     "compiler path changed during the compile", k->cc);
+        if (!ars_backend_sha3(&h->driver, backend, &bad))
+            ars_miss_set(m, "backend_unresolved",
+                         "a compiler backend cannot be resolved", bad);
+        else
+            ars_miss_set(m, "input_changed_during_compile",
+                         "compiler path changed during the compile", k->cc);
         return false;
     }
-    const char *bad = NULL;
     if (!ars_backend_sha3(&h->driver, backend, &bad)) {
         ars_miss_set(m, "backend_unresolved",
                      "a program the driver runs does not resolve to one "
