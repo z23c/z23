@@ -1661,3 +1661,5 @@ ZCL_MODULE_CAPABILITY("tools/command/native_dev_cx_check.c", CAP_FS_READ|CAP_FS_
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_cx_scan.c", CAP_FS_READ|CAP_FS_WRITE, "reads worktree state only through git run via the spawn seam on a small thread pool; the closure scan classifies its libc reach as FS_WRITE but it creates and changes no file")
 
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_wallet_pending_restore.c", CAP_FS_WRITE, "SQLite transaction control uses the write-capable sqlite3_exec API; frontier capture reads rows only")
+
+ZCL_MODULE_CAPABILITY("engine/services/src/ironwood_ipa.c", CAP_FS_WRITE, "Checked allocation can write a failure diagnostic; the coefficient computation performs no file operations.")
