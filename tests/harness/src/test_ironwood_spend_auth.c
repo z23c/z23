@@ -179,9 +179,56 @@ static bool check_sighash_boundary(const struct v6_wire_view *v)
     return !v6_shielded_sighash(v, &p, 1, out) && !memcmp(out, before, 32);
 }
 
+/* Research H1 transparent-coinbase output, spent offline at target H144.
+ * Fixture SHA256 8be913fdab58df0b0e507c53a2915c3e69dcff1df9b18883d57354413fe8fe40.
+ * This checks public signature inputs, not chain maturity or script execution. */
+static bool check_reward_signatures(const struct v6_wire_view *v, const uint8_t hash[32])
+{
+    uint8_t cv[2][32], changed[32]; memcpy(changed, hash, 32); changed[0] ^= 1;
+    for (size_t i = 0; i < 2; ++i) {
+        struct v6_action_view action;
+        if (!v6_core_bundle_action(&v->ironwood, i, &action) || action.cv.size != 32 ||
+            action.rk.size != 32 || action.signature.size != 64 ||
+            !ironwood_spend_auth_verify(action.rk.data, action.signature.data, hash).ok ||
+            ironwood_spend_auth_verify(action.rk.data, action.signature.data, changed).ok) return false;
+        memcpy(cv[i], action.cv.data, 32);
+    }
+    int64_t balance = zcl_read_i64_le(v->ironwood.value_balance.data);
+    return balance == -1249985000 &&
+        ironwood_binding_auth_verify(cv, 2, balance, v->ironwood.binding_signature.data, hash).ok &&
+        !ironwood_binding_auth_verify(cv, 2, balance, v->ironwood.binding_signature.data, changed).ok;
+}
+
+static bool check_reward_wire(const uint8_t *wire, size_t size)
+{
+    uint8_t script[25], want[32], hash[32], txid[32];
+    struct v6_wire_view v; struct v6_wire_cursor cursor; struct v6_span input;
+    if (!zcl_hex_decode("76a91479b000887626b294a914501a4cd226b58b23598388ac", script, 25) ||
+        !zcl_hex_decode("96774c04a6bc5fa0fccd5cefe8b8b906a930b7044adbfb110ff41aee807ed301", want, 32) ||
+        !zcl_hex_decode("e46d7568c0973fff0d0bb1daaf9fcb4ff98e2f91d2e253e9e40d772d5a5223b9", txid, 32) ||
+        v6_core_parse(wire, size, &v) != V6_WIRE_OK || v.inputs != 1 || v.outputs != 0 ||
+        v.ironwood.count != 2 || v.ironwood.value_balance.size != 8 ||
+        v.ironwood.binding_signature.size != 64) return false;
+    if (!v6_core_cursor_init(&v, true, &cursor) || !v6_core_cursor_next(&cursor, &input) ||
+        input.size < 36 || memcmp(input.data, txid, 32) || zcl_read_u32_le(input.data + 32) != 0) return false;
+    const struct v6_prevout prev = {1250000000, {script, sizeof script}};
+    return v6_shielded_sighash(&v, &prev, 1, hash) && !memcmp(hash, want, 32) &&
+        check_reward_signatures(&v, hash);
+}
+
+static bool check_reward_fixture(void)
+{
+    uint8_t wire[9313];
+    FILE *f = fopen("tests/fixtures/ironwood/postnu63-h1-reward-spend.v6", "rb");
+    if (!f) return false;
+    bool ok = fread(wire, 1, sizeof wire, f) == sizeof wire && fgetc(f) == EOF && !ferror(f);
+    if (fclose(f) != 0 || !ok) return false;
+    return check_reward_wire(wire, sizeof wire);
+}
+
 int test_ironwood_spend_auth(void)
 {
-    bool ok = check_case(0) && check_case(1) && check_binding() && check_binding_transaction() && check_transparent_sighash();
+    bool ok = check_case(0) && check_case(1) && check_binding() && check_binding_transaction() && check_transparent_sighash() && check_reward_fixture();
     printf("Ironwood spend authorization: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }
