@@ -30,18 +30,21 @@ static bool rm_block_line(unsigned index, char out[2048])
     return fclose(f) == 0 && ok;
 }
 
-static bool rm_submit(struct rf_fixture *f, unsigned index)
+static bool rm_submit(struct rf_fixture *f, unsigned index, bool accept)
 {
     char block[2048], reply[RNF_RAW];
     if (!rm_block_line(index, block)) return false;
     const char *const args[] = {"submitblock", block, NULL};
-    return rf_rpc(f, args, reply, sizeof(reply)) == 0 &&
-        !strncmp(reply, "null", 4) && strspn(reply + 4, "\r\n") == strlen(reply + 4);
+    int rc = rf_rpc(f, args, reply, sizeof(reply));
+    if (!accept) return rc > 0 && strstr(reply, "block-not-finalized-by-reducer") &&
+        strstr(reply, "private block lacks applied validation evidence");
+    return rc == 0 && !strncmp(reply, "null", 4) &&
+        strspn(reply + 4, "\r\n") == strlen(reply + 4);
 }
 
 static bool rm_replay(struct rf_fixture *f, unsigned count)
 {
-    for (unsigned i = 0; i < count; i++) if (!rm_submit(f, i)) return false;
+    for (unsigned i = 0; i < count; i++) if (!rm_submit(f, i, true)) return false;
     return rf_height(f, (int)count);
 }
 
@@ -95,16 +98,16 @@ static bool rm_boundary(struct rf_fixture *f, bool mature)
     unsigned parent = mature ? 100 : 99;
     RM_CHECK(rm_replay(f, parent));
     RM_CHECK(rm_input_coin(f, true));
-    RM_CHECK(rm_submit(f, mature ? 101 : 100));
+    RM_CHECK(rm_submit(f, mature ? 101 : 100, mature));
     RM_CHECK(rm_wait(f, mature));
     RM_CHECK(rf_height(f, mature ? 101 : 99));
     RM_CHECK(rm_input_coin(f, !mature));
-    if (mature) RM_CHECK(rm_coin(f, rm_output, true, 1249990000, 101, 0, rm_output_script));
+    RM_CHECK(rm_coin(f, rm_output, mature, 1249990000, 101, 0, rm_output_script));
     rnf_node_stop(&f->node);
     RM_CHECK(rf_start(f) && rf_ready(f));
     RM_CHECK(rf_height(f, mature ? 101 : 99));
     RM_CHECK(rm_input_coin(f, !mature));
-    if (mature) RM_CHECK(rm_coin(f, rm_output, true, 1249990000, 101, 0, rm_output_script));
+    RM_CHECK(rm_coin(f, rm_output, mature, 1249990000, 101, 0, rm_output_script));
     return true;
 }
 
