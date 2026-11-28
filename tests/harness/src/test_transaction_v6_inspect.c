@@ -628,6 +628,15 @@ static bool stage_refusals(struct v6_wire_view *full, uint8_t *wire, size_t size
     return !ironwood_postnu63_proof_size(UINT64_MAX, &size).ok && size == saved;
 }
 
+static bool lookup_short_refusal(const struct ironwood_postnu63_stage *stage)
+{
+    struct ironwood_postnu63_stage short_stage, before;
+    memcpy(&short_stage, stage, sizeof short_stage);
+    short_stage.proof.length = short_stage.proof.position + 6 * (size_t)stage->actions * 32 - 1;
+    memcpy(&before, &short_stage, sizeof before);
+    return !ironwood_postnu63_lookup_challenges(&short_stage).ok && !memcmp(&short_stage, &before, sizeof before);
+}
+
 /* Challenges from the pinned upstream 0.4.0 verifier trace for each proof. */
 static bool check_lookup_stage(struct ironwood_postnu63_stage *stage, uint8_t *wire)
 {
@@ -641,12 +650,9 @@ static bool check_lookup_stage(struct ironwood_postnu63_stage *stage, uint8_t *w
     if (!count || count > 2) return false;
     uint8_t b[32], g[32], swap[32];
     if (!zcl_hex_decode(beta[count - 1], b, 32) || !zcl_hex_decode(gamma[count - 1], g, 32)) return false;
-    struct ironwood_postnu63_stage before, short_stage, failed;
+    struct ironwood_postnu63_stage before, failed;
     memcpy(&before, stage, sizeof before);
-    short_stage = before; short_stage.proof.length = short_stage.proof.position + 6 * (size_t)count * 32 - 1;
-    memcpy(&failed, &short_stage, sizeof failed);
-    if (ironwood_postnu63_lookup_challenges(&short_stage).ok || memcmp(&short_stage, &failed, sizeof failed))
-        return false;
+    if (!lookup_short_refusal(stage)) return false;
     if (!ironwood_postnu63_lookup_challenges(stage).ok || stage->lookup_offset != count * 320 ||
         stage->lookup_size != count * 192 || stage->proof.position != count * 512 ||
         memcmp(stage->beta, b, 32) || memcmp(stage->gamma, g, 32)) return false;
