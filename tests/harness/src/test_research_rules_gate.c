@@ -1,0 +1,212 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+#include "services/research_rules_gate.h"
+#include "base/hex.h"
+#include "services/research_block_size.h"
+#include "primitives/block.h"
+#include "util/safe_alloc.h"
+#include "storage/disk_block_io.h"
+#include "platform/directory_compat.h"
+#include "test/test_core.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+struct gate_fixture {
+    struct miner_signal_catalog_pin pin;
+    struct research_rules_binding binding;
+    struct block_index index[126];
+    struct block *blocks;
+};
+
+static int expect_gate(const char *name, struct research_gate_decision d,
+                       enum research_gate_verdict verdict, const char *rule,
+                       size_t offender)
+{
+    if (d.verdict == verdict && d.offender == offender &&
+        ((!rule && !d.rule) || (rule && d.rule && !strcmp(rule, d.rule)))) return 0;
+    fprintf(stderr, "research gate %s: verdict=%d rule=%s detail=%s offender=%zu active=%d,%d\n",
+            name, d.verdict, d.rule ? d.rule : "(none)", d.detail, d.offender,
+            d.rules.active[0], d.rules.active[1]);
+    return 1;
+}
+
+static bool gate_fixture_init(struct gate_fixture *f, const char *dir)
+{
+    const struct chain_research_descriptor *d = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    if (!d) return false;
+    f->pin = (struct miner_signal_catalog_pin){ .start = 103, .window = 20, .count = 2 };
+    f->binding = (struct research_rules_binding){ d->chain, &f->pin };
+    memcpy(f->pin.genesis, d->chain->consensus.hashGenesisBlock.data, 32);
+    if (!zcl_hex_decode("0470426015683b2d25ae8014a684975fa4841720b848c22457ee8f510a1ab718",
+                        f->pin.network_id, 32)) return false;
+    memcpy(f->pin.entries[0].rule_revision, research_rule_revision[0], 32);
+    memcpy(f->pin.entries[1].rule_revision, research_rule_revision[1], 32);
+    f->pin.entries[0].activation = 125;
+    f->pin.entries[1].activation = 126;
+    struct miner_signal_catalog c = { .start = 103, .window = 20, .count = 2,
+                                      .entries = f->pin.entries };
+    memcpy(c.network_id, f->pin.network_id, 32);
+    memcpy(c.genesis, f->pin.genesis, 32);
+    struct miner_signal_schedule schedule;
+    if (!miner_signal_catalog_select(&c, 0, &schedule).ok) return false;
+    memcpy(f->pin.digest, schedule.catalog, 32);
+    f->blocks = calloc(126, sizeof(*f->blocks));
+    if (!f->blocks) return false;
+    for (int h = 0; h < 126; ++h) {
+        struct block *b = &f->blocks[h];
+        block_init(b);
+        b->vtx = calloc(1, sizeof(*b->vtx));
+        if (!b->vtx) return false;
+        b->num_vtx = 1;
+        transaction_init(b->vtx);
+        if (!transaction_alloc(b->vtx, 1, 1)) return false;
+        outpoint_set_null(&b->vtx[0].vin[0].prevout);
+        b->vtx[0].vout[0].value = 0;
+        uint8_t bits[32] = {0};
+        if (h >= 103 && h < 122) bits[0] = 3;
+        struct script *s = &b->vtx[0].vout[0].script_pub_key;
+        miner_signal_ballot_script(f->pin.digest, bits, s->data);
+        s->size = MINER_SIGNAL_SCRIPT_BYTES;
+        transaction_compute_hash(b->vtx);
+        b->header.hashMerkleRoot = b->vtx[0].hash;
+        b->header.nTime = (uint32_t)h;
+        if (h) b->header.hashPrevBlock = f->index[h - 1].hashBlock;
+        struct block_index *bi = &f->index[h];
+        bi->nHeight = h;
+        bi->pprev = h ? &f->index[h - 1] : NULL;
+        bi->phashBlock = &bi->hashBlock;
+        block_get_hash(b, &bi->hashBlock);
+        if (h >= 102 && h <= 122) {
+            struct disk_block_pos pos;
+            disk_block_pos_init(&pos);
+            if (!write_block_to_disk(b, &pos, dir, d->chain->pchMessageStart)) return false;
+            block_index_disk_pos_store(bi, pos.nFile, pos.nPos);
+            (void)block_index_status_fetch_or(bi, BLOCK_HAVE_DATA);
+        }
+    }
+    return true;
+}
+
+static int ceiling_test(void)
+{
+    const struct chain_research_descriptor *research =
+        chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    const struct chain_params *ordinary = chain_params_get();
+    struct block b;
+    block_init(&b);
+    b.num_vtx = 1;
+    b.vtx = calloc(1, sizeof(*b.vtx));
+    if (!research || !ordinary || !b.vtx) { block_free(&b); return 1; }
+    transaction_init(b.vtx);
+    if (!transaction_alloc(b.vtx, 0, 251)) { block_free(&b); return 1; }
+    for (size_t i = 0; i < 249; ++i) {
+        b.vtx[0].vout[i].script_pub_key.size = 8000;
+        memset(b.vtx[0].vout[i].script_pub_key.data, 0x51, 8000);
+    }
+    struct byte_stream stream;
+    stream_init(&stream, 0);
+    bool ok = block_serialize(&b, &stream);
+    size_t base = stream.size;
+    stream_free(&stream);
+    if (!ok || base >= 2000000 || 2000001 - base >= MAX_SCRIPT_SIZE) {
+        block_free(&b);
+        return 1;
+    }
+    struct script *s = &b.vtx[0].vout[249].script_pub_key;
+    s->size = 2000000 - base - 2;
+    memset(s->data, 0x51, s->size + 1);
+    bool exact = research_block_size_check_ceiling(research->chain, &b) == RESEARCH_BLOCK_SIZE_OK;
+    ++s->size;
+    bool over = research_block_size_check_ceiling(research->chain, &b) == RESEARCH_BLOCK_SIZE_EXCEEDED;
+    zcl_alloc_fault_fail_next("research block size");
+    bool unchanged = research_block_size_check_ceiling(ordinary, &b) == RESEARCH_BLOCK_SIZE_OK &&
+                     zcl_alloc_fault_armed_label() != NULL;
+    zcl_alloc_fault_clear();
+    block_free(&b);
+    return exact && over && unchanged ? 0 : 1;
+}
+
+static int activation_test(void)
+{
+    int failures = 0;
+    char raw[PATH_MAX], dir[PATH_MAX];
+    test_make_tmpdir(raw, sizeof raw, "research_gate", "blocks");
+    if (!platform_directory_canonical_real(raw, dir, sizeof dir)) return 1;
+    struct gate_fixture f = {0};
+    bool selected = chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD);
+    bool ok = selected && gate_fixture_init(&f, dir);
+    struct block b;
+    block_init(&b);
+    b.num_vtx = 2;
+    b.vtx = calloc(2, sizeof(*b.vtx));
+    if (!ok || !b.vtx) { failures++; goto done; }
+    transaction_init(&b.vtx[0]);
+    transaction_init(&b.vtx[1]);
+    if (!transaction_alloc(&b.vtx[0], 1, 25)) { failures++; goto done; }
+    outpoint_set_null(&b.vtx[0].vin[0].prevout);
+    for (size_t i = 0; i < 24; ++i) {
+        b.vtx[0].vout[i].script_pub_key.size = 8000;
+        memset(b.vtx[0].vout[i].script_pub_key.data, 0x51, 8000);
+    }
+    struct byte_stream stream;
+    stream_init(&stream, 0);
+    ok = block_serialize(&b, &stream);
+    size_t base = stream.size;
+    stream_free(&stream);
+    if (!ok || base >= 200000 || 200001 - base >= MAX_SCRIPT_SIZE) {
+        failures++; goto done;
+    }
+    struct script *s = &b.vtx[0].vout[24].script_pub_key;
+    s->size = 200001 - base - 2;
+    memset(s->data, 0x51, s->size);
+    struct research_gate_decision unbound = research_rules_gate_for(NULL, NULL, &b, NULL, NULL);
+    failures += expect_gate("unbound oversized", unbound, RESEARCH_GATE_PASS, NULL, 0);
+    struct research_gate_decision d = research_rules_gate_for(&f.binding, f.binding.params, &b,
+                                                              &f.index[123], dir);
+    failures += expect_gate("inactive cap", d, RESEARCH_GATE_PASS, NULL, 0);
+    d = research_rules_gate_for(&f.binding, f.binding.params, &b, &f.index[124], dir);
+    failures += expect_gate("active cap", d, RESEARCH_GATE_REJECT, "research-block-size-limit", 0);
+    --s->size;
+    d = research_rules_gate_for(&f.binding, f.binding.params, &b, &f.index[124], dir);
+    failures += expect_gate("inclusive cap", d, RESEARCH_GATE_PASS, NULL, 0);
+    b.vtx[1].value_balance = -1;
+    d = research_rules_gate_for(&f.binding, f.binding.params, &b, &f.index[125], dir);
+    failures += expect_gate("deposit freeze", d, RESEARCH_GATE_REJECT, "research-deposit-freeze", 2);
+    b.vtx[1].value_balance = 1;
+    d = research_rules_gate_for(&f.binding, f.binding.params, &b, &f.index[125], dir);
+    failures += expect_gate("withdrawal", d, RESEARCH_GATE_PASS, NULL, 0);
+    block_index_disk_pos_store(&f.index[103], -1, 0);
+    d = research_rules_gate_for(&f.binding, f.binding.params, &b, &f.index[125], dir);
+    failures += expect_gate("missing body", d, RESEARCH_GATE_HOLD, "research-rules-unavailable", 0);
+    if (d.rules.active[0] || d.rules.active[1]) failures++;
+    struct research_rules_binding invalid = { chain_params_get(), &f.pin };
+    chain_params_select(CHAIN_MAIN);
+    invalid.params = chain_params_get();
+    d = research_rules_gate_for(&invalid, invalid.params, &b, &f.index[125], dir);
+    failures += expect_gate("invalid binding", d, RESEARCH_GATE_HOLD, "research-rules-unavailable", 0);
+done:
+    block_free(&b);
+    if (f.blocks) {
+        for (int h = 0; h < 126; ++h) block_free(&f.blocks[h]);
+        free(f.blocks);
+    }
+    chain_params_select(CHAIN_MAIN);
+    (void)test_rm_rf_recursive(raw);
+    if (failures) fprintf(stderr, "research rules gate: activation fixture failures=%d\n", failures);
+    return failures;
+}
+
+int test_research_rules_gate(void)
+{
+    struct block b;
+    block_init(&b);
+    struct research_gate_decision d = research_rules_gate_for(NULL, NULL, &b, NULL, NULL);
+    block_free(&b);
+    if (d.verdict != RESEARCH_GATE_PASS || d.rules.active[0] || d.rules.active[1] ||
+        d.rule || d.offender) {
+        fprintf(stderr, "research rules gate: unbound pass failed\n");
+        return 1;
+    }
+    return ceiling_test() + activation_test();
+}
