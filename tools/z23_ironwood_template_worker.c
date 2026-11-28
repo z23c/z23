@@ -1,6 +1,7 @@
 /* purpose: Solve an unchanged, coinbase-only private Ironwood template. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "chain/chainparams.h"
 #include "core/serialize.h"
 #include "json/json.h"
@@ -20,7 +21,7 @@ static bool read_template(const char *path, struct json_value *json)
 {
     FILE *f = fopen(path, "rb");
     if (!f) return false;
-    char *buf = malloc(TEMPLATE_LIMIT + 1);
+    char *buf = zcl_malloc(TEMPLATE_LIMIT + 1, "template JSON");
     if (!buf) { fclose(f); return false; }
     size_t n = fread(buf, 1, TEMPLATE_LIMIT + 1, f);
     bool ok = n <= TEMPLATE_LIMIT && !ferror(f) && feof(f);
@@ -35,7 +36,7 @@ static bool decode_coinbase(const char *hex, struct transaction *tx)
     if (!hex) return false;
     size_t n = strlen(hex);
     if (!n || n % 2 || n > TX_HEX_LIMIT) return false;
-    uint8_t *raw = malloc(n / 2);
+    uint8_t *raw = zcl_malloc(n / 2, "template coinbase");
     if (!raw) return false;
     bool ok = zcl_hex_decode(hex, raw, n / 2);
     struct byte_stream in, out;
@@ -95,7 +96,7 @@ static bool template_block(const struct json_value *json, struct block *block, i
     const struct json_value *cb = json_get(obj, "coinbasetxn");
     if (!obj || obj->type != JSON_OBJ || !txs || txs->type != JSON_ARR || json_size(txs) != 0 ||
         !cb || cb->type != JSON_OBJ || !template_header(obj, block, height)) return false;
-    block->vtx = calloc(1, sizeof *block->vtx);
+    block->vtx = zcl_calloc(1, sizeof *block->vtx, "template transaction");
     if (!block->vtx) return false;
     block->num_vtx = 1;
     transaction_init(&block->vtx[0]);
