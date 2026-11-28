@@ -34,9 +34,12 @@ static struct ironwood_history_event verified;
  * stage tick left a restarted node idle for minutes. */
 #define UTXO_IRONWOOD_REPLAY_STEP_BUDGET 1024u
 static unsigned replay_step_budget = UTXO_IRONWOOD_REPLAY_STEP_BUDGET;
-/* After the first step the loop also stops when one soft time slice is spent
- * (the bootstrap slice), so one prepare call holds the caller's stage
- * transaction for at most one slice plus one step, whatever a body costs. */
+/* After the first step the replay loop also stops when one soft time slice
+ * is spent (the bootstrap slice): the loop itself runs for at most one slice
+ * plus one step, whatever that step costs. The slice bounds the loop only.
+ * The store audit, the ancestry slot allocation, the empty-root setup and
+ * the final preparation also run inside the caller's stage transaction, but
+ * outside this timer. */
 #define UTXO_IRONWOOD_REPLAY_SOFT_SLICE_US 100000
 static int64_t replay_soft_slice_us = UTXO_IRONWOOD_REPLAY_SOFT_SLICE_US;
 

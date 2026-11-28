@@ -483,6 +483,42 @@ static bool corruption_refused(struct session_fixture *f)
     bool refused = session_prepare(f, 3, &p) == UTXO_IRONWOOD_LOCAL_ERROR && !memcmp(&p, &before, sizeof p);
     return sql(f->db, "ROLLBACK") && refused;
 }
+/* A checkpoint the store wrote itself from a body that is not the canonical
+ * block at its height passes the audit. Only the comparison of each replayed
+ * step with its row refuses the canonical block above it with a local error;
+ * without it the final preparation waits on the store tip instead. */
+static bool foreign_row_refused(struct session_fixture *f)
+{
+    sqlite3 *db = NULL;
+    struct block body = {0};
+    struct block_index foreign = {0};
+    struct uint256 hash = {0};
+    struct utxo_ironwood_pending p = {0}, before;
+    bool ok = block_clone(&body, &f->bodies[0]);
+    if (ok && sqlite3_open(":memory:", &db) != SQLITE_OK) {
+        /* A failed open can still leave a handle to close. */
+        sqlite3_close(db);
+        ok = false;
+    }
+    if (!ok) { block_free(&body); return false; }
+    body.header.hashPrevBlock = f->index[0].hashBlock;
+    block_get_hash(&body, &hash);
+    foreign.hashBlock = hash; foreign.phashBlock = &foreign.hashBlock;
+    foreign.pprev = &f->index[0]; foreign.nHeight = 1;
+    ok = sql(db, "BEGIN") &&
+        utxo_ironwood_session_prepare(db, &foreign, &body, session_reader, NULL, f, &p) == UTXO_IRONWOOD_OK &&
+        p.checkpoint.count == 0 && utxo_ironwood_session_publish(&p) && sql(db, "COMMIT");
+    utxo_ironwood_session_reset();
+    memset(&p, 0xa5, sizeof p); memcpy(&before, &p, sizeof p);
+    ok = ok && sql(db, "BEGIN") &&
+        utxo_ironwood_session_prepare(db, &f->index[3], &f->bodies[3], session_reader, NULL, f, &p) == UTXO_IRONWOOD_LOCAL_ERROR &&
+        !memcmp(&p, &before, sizeof p);
+    if (!sqlite3_get_autocommit(db)) (void)sql(db, "ROLLBACK");
+    utxo_ironwood_session_reset();
+    if (sqlite3_close(db) != SQLITE_OK) ok = false;
+    block_free(&body);
+    return ok;
+}
 int test_utxo_apply_ironwood_session(void)
 {
     struct session_fixture f = {0};
@@ -495,6 +531,7 @@ int test_utxo_apply_ironwood_session(void)
         {"missing body waits then resumes", missing_body_waits},
         {"partial empty", partial_empty_refused}, {"partial populated", partial_populated_refused},
         {"corruption", corruption_refused},
+        {"foreign checkpoint row", foreign_row_refused},
     };
     bool ok = true;
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
