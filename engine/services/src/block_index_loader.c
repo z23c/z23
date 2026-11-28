@@ -1292,7 +1292,7 @@ struct zcl_result load_block_index_with_genesis(struct main_state *ms,
             return ZCL_ERR(-3, "load_block_index: csr rejected genesis tip "
                            "commit (%s)", csr_result_name(rc));
         }
-        return ZCL_OK;
+        return ZCL_ERR(-2, "load_block_index: out of memory inserting genesis block index");
     }
 
     /* Post-load: compute nChainWork, nChainTx, skip links */

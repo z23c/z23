@@ -694,6 +694,12 @@ static int bil_genesis_cases(void)
     struct main_state ms;
     main_state_init(&ms);
     const struct chain_params *cp = chain_params_get();
+    zcl_alloc_fault_fail_next("block_index");
+    struct zcl_result failed = load_block_index(&ms, cp, NULL, false);
+    bool fault_fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    BIL_CHECK("bil: genesis allocation failure is reported",
+              fault_fired && !failed.ok && strstr(failed.message, "genesis"));
     bool ok = load_block_index(&ms, cp, NULL, false).ok;
     struct block_index *g = block_map_find(&ms.map_block_index,
                                           &cp->consensus.hashGenesisBlock);
