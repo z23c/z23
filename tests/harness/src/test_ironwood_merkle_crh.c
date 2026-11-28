@@ -44,9 +44,9 @@ static bool rejects(uint8_t *params, const uint8_t leaf[32])
         ironwood_merkle_crh(0, leaf, leaf, params, IRONWOOD_MERKLE_PARAMETERS_SIZE - 1, out).ok ||
         memcmp(out, before, 32)) return false;
     params[32] ^= 1;
-    bool ok = !ironwood_merkle_parameters_valid(params, IRONWOOD_MERKLE_PARAMETERS_SIZE) &&
-        !ironwood_merkle_parameters_valid(NULL, IRONWOOD_MERKLE_PARAMETERS_SIZE) &&
-        !ironwood_merkle_parameters_valid(params, IRONWOOD_MERKLE_PARAMETERS_SIZE - 1) &&
+    bool ok = !ironwood_merkle_parameters_validate(params, IRONWOOD_MERKLE_PARAMETERS_SIZE).ok &&
+        !ironwood_merkle_parameters_validate(NULL, IRONWOOD_MERKLE_PARAMETERS_SIZE).ok &&
+        !ironwood_merkle_parameters_validate(params, IRONWOOD_MERKLE_PARAMETERS_SIZE - 1).ok &&
         !ironwood_merkle_crh(0, leaf, leaf, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, out).ok &&
         !memcmp(out, before, 32);
     params[32] ^= 1;
@@ -59,7 +59,7 @@ int test_ironwood_merkle_crh(void)
     if (!f) return 1;
     bool ok = fread(params, 1, sizeof params, f) == sizeof params && fgetc(f) == EOF && !ferror(f);
     if (fclose(f) != 0 || !ok) return 1;
-    ok = ironwood_merkle_parameters_valid(params, sizeof params) &&
+    ok = ironwood_merkle_parameters_validate(params, sizeof params).ok &&
         zcl_hex_decode("7bd7041a794980ac3d8c413946d9a58e2b70de01ad27bfe18959f63d90e2b31a", first, 32) &&
         zcl_hex_decode("72d98fa009f5a73de8e05e9e25744cf6518f503881b1ed4056ae4fe176120f04", second, 32) &&
         empty_roots(params, empty) && one_root(params, empty, first) && two_root(params, empty, first, second) &&

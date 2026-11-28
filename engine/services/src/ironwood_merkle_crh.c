@@ -12,12 +12,14 @@ static const uint8_t parameter_hash[32] = {
     0xc7,0x42,0xf4,0xc7,0x6e,0x37,0x27,0xde,0x7b,0xc9,0x3b,0xf4,0x46,0xa5,0x0e,0x9a,
     0x84,0xef,0xa7,0x7a,0x89,0x87,0xd9,0x6f,0x40,0x9d,0x6c,0x46,0x4e,0xd8,0x26,0x2b
 };
-bool ironwood_merkle_parameters_valid(const uint8_t *p, size_t size)
+struct zcl_result ironwood_merkle_parameters_validate(const uint8_t *p, size_t size)
 {
-    if (!p || size != IRONWOOD_MERKLE_PARAMETERS_SIZE) return false;
+    if (!p || size != IRONWOOD_MERKLE_PARAMETERS_SIZE)
+        return ZCL_ERR(-1, "Invalid Merkle parameter size");
     struct sha256_ctx h; uint8_t digest[32];
     sha256_init(&h); sha256_write(&h, p, size); sha256_finalize(&h, digest);
-    return memcmp(digest, parameter_hash, 32) == 0;
+    return memcmp(digest, parameter_hash, 32) == 0 ? ZCL_OK :
+        ZCL_ERR(-1, "Invalid Merkle parameter digest");
 }
 /* Upstream incomplete addition returns bottom for either identity or equal x.
  * An OpenSSL error is separate from this mathematical bottom. */
@@ -72,7 +74,7 @@ static bool merkle_inputs_valid(unsigned level, const uint8_t left[32], const ui
                                 const uint8_t *parameters, size_t parameters_size, const uint8_t *out)
 {
     return left && right && out && level < 32 &&
-        ironwood_merkle_parameters_valid(parameters, parameters_size) &&
+        ironwood_merkle_parameters_validate(parameters, parameters_size).ok &&
         ironwood_pasta_fp_canonical(left).ok && ironwood_pasta_fp_canonical(right).ok;
 }
 

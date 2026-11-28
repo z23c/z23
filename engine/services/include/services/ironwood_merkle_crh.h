@@ -13,7 +13,7 @@
  * element. This primitive does not authenticate an anchor or update state. */
 enum { IRONWOOD_MERKLE_PARAMETERS_SIZE = 32800 };
 /* Check the pinned table without hashing a node. */
-bool ironwood_merkle_parameters_valid(const uint8_t *parameters, size_t parameters_size);
+struct zcl_result ironwood_merkle_parameters_validate(const uint8_t *parameters, size_t parameters_size);
 struct zcl_result ironwood_merkle_crh(unsigned level, const uint8_t left[32],
     const uint8_t right[32], const uint8_t *parameters, size_t parameters_size,
     uint8_t out[32]);
