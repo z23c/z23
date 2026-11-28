@@ -126,7 +126,12 @@ static bool prologue_refusal(const char *dir)
         struct app_context boot = {0};
         boot.datadir = dir;
         boot.testnet_profile = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
-        _exit(app_init(&boot) ? 1 : 0);
+        bool refused = !app_init(&boot);
+        const struct chain_params *selected = chain_params_get();
+        _exit(refused &&
+              selected->consensus.vUpgrades[UPGRADE_OVERWINTER].nActivationHeight != NETWORK_UPGRADE_ALWAYS_ACTIVE &&
+              selected->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight != NETWORK_UPGRADE_ALWAYS_ACTIVE
+                  ? 0 : 1);
     }
     int status;
     struct snapshot after = {0};
@@ -260,9 +265,17 @@ int test_boot_ballot_catalog(void)
     int reg_ow = chain_params_get()->consensus.vUpgrades[UPGRADE_OVERWINTER].nActivationHeight;
     int reg_sap = chain_params_get()->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight;
     CHECK(chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    /* Shielded upgrades activate only when a verified catalog binds. */
+    int research_ow = chain_params_get()->consensus.vUpgrades[UPGRADE_OVERWINTER].nActivationHeight;
+    int research_sap = chain_params_get()->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight;
+    CHECK(research_ow != NETWORK_UPGRADE_ALWAYS_ACTIVE && research_sap != NETWORK_UPGRADE_ALWAYS_ACTIVE);
     CHECK(!boot_ballot_catalog_load(&ctx) && !research_rules_binding());
+    CHECK(chain_params_get()->consensus.vUpgrades[UPGRADE_OVERWINTER].nActivationHeight == research_ow &&
+          chain_params_get()->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight == research_sap);
     struct miner_signal_catalog_pin wrong = {0};
     CHECK(!research_rules_install(chain_params_get(), &wrong) && !research_rules_binding());
+    CHECK(chain_params_get()->consensus.vUpgrades[UPGRADE_OVERWINTER].nActivationHeight == research_ow &&
+          chain_params_get()->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight == research_sap);
 
     struct json_value doc = {0};
     struct miner_signal_catalog_pin pin = {0};

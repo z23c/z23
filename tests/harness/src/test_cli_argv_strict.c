@@ -1500,25 +1500,27 @@ static int cas_test_daemon_natural_exit(void)
 static int cas_test_unsupported_profile(void)
 {
     int failures = 0;
-    TEST("CLI rejects profile selector before method and preserves late RPC data") {
-        char home[PATH_MAX], out[8192];
+    TEST("CLI rejects profile selector in either order") {
+        char home[PATH_MAX], out[8192], path[PATH_MAX + 32];
+        struct stat st;
         ASSERT(test_mkdtemp(home, sizeof(home), "cas_profile") != NULL);
         char dirarg[PATH_MAX + 16];
         snprintf(dirarg, sizeof(dirarg), "-datadir=%s", home);
         char *early[] = {CAS_BIN, dirarg, "--testnet-profile=fixture", "sentinel", NULL};
-        ASSERT(cas_run(early, home, out, sizeof(out)) != 0);
+        ASSERT(cas_run(early, home, out, sizeof(out)) == ZCL_COMMAND_EXIT_INVALID);
         ASSERT(cas_contains(out, "error=UNSUPPORTED_PROFILE"));
         char *early_first[] = {CAS_BIN, "--testnet-profile=fixture", "sentinel", NULL};
-        ASSERT(cas_run(early_first, home, out, sizeof(out)) != 0);
+        ASSERT(cas_run(early_first, home, out, sizeof(out)) == ZCL_COMMAND_EXIT_INVALID);
         ASSERT(cas_contains(out, "error=UNSUPPORTED_PROFILE"));
         char *late[] = {CAS_BIN, dirarg, "sentinel", "-testnet-profile=fixture", NULL};
-        ASSERT(cas_run(late, home, out, sizeof(out)) != 0);
-        ASSERT(!cas_contains(out, "error=UNSUPPORTED_PROFILE"));
-        ASSERT(cas_contains(out, "no RPC cookie"));
+        ASSERT(cas_run(late, home, out, sizeof(out)) == ZCL_COMMAND_EXIT_INVALID);
+        ASSERT(cas_contains(out, "error=UNSUPPORTED_PROFILE"));
         char *late_long[] = {CAS_BIN, dirarg, "sentinel", "--testnet-profile=ironwood", NULL};
-        ASSERT(cas_run(late_long, home, out, sizeof(out)) != 0);
+        ASSERT(cas_run(late_long, home, out, sizeof(out)) == ZCL_COMMAND_EXIT_INVALID);
+        ASSERT(cas_contains(out, "error=UNSUPPORTED_PROFILE"));
         ASSERT(!cas_contains(out, "Invalid or unsafe testnet profile invocation."));
-        ASSERT(cas_contains(out, "no RPC cookie"));
+        ASSERT(snprintf(path, sizeof(path), "%s/.cookie", home) > 0);
+        ASSERT(lstat(path, &st) != 0 && errno == ENOENT);
         test_cleanup_tmpdir(home);
         PASS();
     } _test_next:;
@@ -1761,18 +1763,59 @@ static int cas_test_research_nonclient_dispatch(void)
 static int cas_test_research_client_aliases(void)
 {
     int failures = 0;
-    TEST("research selector preserves client aliases") {
-        char home[PATH_MAX], out[8192];
-        ASSERT(test_mkdtemp(home, sizeof home, "cas_research_alias") != NULL);
+    TEST("research selector refuses client aliases in either order") {
+        char home[PATH_MAX], out[8192], path[PATH_MAX + 32];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_research_alias") != NULL);
         const char *aliases[] = {"--status", "--summary", "--agent"};
-        bool client = true;
-        for (size_t i = 0; i < sizeof aliases / sizeof aliases[0]; i++) {
-            char *argv[] = {CAS_BIN, (char *)aliases[i], "-testnet-profile=ironwood", NULL};
-            (void)cas_run(argv, home, out, sizeof out);
-            client = client && !strstr(out, "Invalid or unsafe testnet profile invocation.");
+        const char *selectors[] = {"-testnet-profile=ironwood", "--testnet-profile=ironwood"};
+        bool refused = true;
+        for (size_t i = 0; i < sizeof(aliases) / sizeof(aliases[0]); i++) {
+            for (size_t j = 0; j < sizeof(selectors) / sizeof(selectors[0]); j++) {
+                char *after[] = {CAS_BIN, (char *)aliases[i], (char *)selectors[j], NULL};
+                int after_rc = cas_run(after, home, out, sizeof(out));
+                bool after_refused = after_rc == ZCL_COMMAND_EXIT_INVALID &&
+                    strstr(out, "error=UNSUPPORTED_PROFILE") && !strstr(out, "zcl.public_status") &&
+                    !strstr(out, "Invalid or unsafe testnet profile invocation.");
+                char *before[] = {CAS_BIN, (char *)selectors[j], (char *)aliases[i], NULL};
+                int before_rc = cas_run(before, home, out, sizeof(out));
+                bool before_refused = before_rc == ZCL_COMMAND_EXIT_INVALID &&
+                    strstr(out, "error=UNSUPPORTED_PROFILE") && !strstr(out, "zcl.public_status");
+                if (!after_refused || !before_refused)
+                    fprintf(stderr, "alias %s selector %s: after rc=%d refused=%d before rc=%d refused=%d\n",
+                            aliases[i], selectors[j], after_rc, after_refused, before_rc, before_refused);
+                refused = refused && after_refused && before_refused;
+            }
         }
+        ASSERT(snprintf(path, sizeof(path), "%s/.zclassic-c23", home) > 0);
+        struct stat st;
+        bool untouched = lstat(path, &st) != 0 && errno == ENOENT;
         test_cleanup_tmpdir(home);
-        ASSERT(client);
+        ASSERT(refused && untouched);
+        PASS();
+    }
+    TEST("research selector refuses a method in either order; explicit target flags stay the client route") {
+        char home[PATH_MAX], out[8192], flag[PATH_MAX + 32];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_research_order") != NULL);
+        ASSERT(snprintf(flag, sizeof(flag), "-datadir=%s/target", home) > 0);
+        char *after[] = {CAS_BIN, "getblockcount", "-testnet-profile=ironwood", NULL};
+        int after_rc = cas_run(after, home, out, sizeof(out));
+        bool after_refused = after_rc == ZCL_COMMAND_EXIT_INVALID && strstr(out, "error=UNSUPPORTED_PROFILE");
+        char *before[] = {CAS_BIN, "-testnet-profile=ironwood", "getblockcount", NULL};
+        int before_rc = cas_run(before, home, out, sizeof(out));
+        bool before_refused = before_rc == ZCL_COMMAND_EXIT_INVALID && strstr(out, "error=UNSUPPORTED_PROFILE");
+        char *targeted[] = {CAS_BIN, "getblockcount", flag, "-rpcport=28023",
+                            "--testnet-profile=ironwood", NULL};
+        int targeted_rc = cas_run(targeted, home, out, sizeof(out));
+        bool targeted_refused = targeted_rc == ZCL_COMMAND_EXIT_INVALID && strstr(out, "error=UNSUPPORTED_PROFILE");
+        char *plain[] = {CAS_BIN, "getblockcount", flag, "-rpcport=28023", NULL};
+        int plain_rc = cas_run(plain, home, out, sizeof(out));
+        bool plain_named = plain_rc != ZCL_COMMAND_EXIT_INVALID && plain_rc > 0 &&
+            strstr(out, "error=CONNECT_REFUSED") && strstr(out, "/target/.cookie");
+        if (!after_refused || !before_refused || !targeted_refused || !plain_named)
+            fprintf(stderr, "method order: after rc=%d refused=%d before rc=%d refused=%d targeted rc=%d refused=%d plain rc=%d named=%d out=%s\n",
+                    after_rc, after_refused, before_rc, before_refused, targeted_rc, targeted_refused, plain_rc, plain_named, out);
+        test_cleanup_tmpdir(home);
+        ASSERT(after_refused && before_refused && targeted_refused && plain_named);
         PASS();
     } _test_next:;
     return failures;

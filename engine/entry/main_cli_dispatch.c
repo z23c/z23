@@ -139,7 +139,10 @@ int cli_parse_target_args(int argc, char **argv, struct cli_target_args *t)
         const char *name = a[0] == '-' && a[1] == '-' ? a + 1 : a;
         const char *selector = "-testnet-profile";
         size_t length = strlen(selector);
-        if (!t->method && strncmp(name, selector, length) == 0 &&
+        /* Refused wherever it appears: after the method it would otherwise be
+         * forwarded as a stray RPC parameter while the client connects to its
+         * default target. */
+        if (strncmp(name, selector, length) == 0 &&
             (name[length] == 0 || name[length] == '=')) {
             fprintf(stderr, "error=UNSUPPORTED_PROFILE detail=generic testnet profile cannot be used by this client\n");
             return ZCL_COMMAND_EXIT_INVALID;

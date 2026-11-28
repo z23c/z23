@@ -152,6 +152,11 @@ static int bt_tip_binding_child(void)
     BT_CHECK(research_rules_install(d->chain, &pin));
     struct research_tip_rules rules = research_rules_tip_for_parent(NULL);
     BT_CHECK(rules.unavailable && rules.freeze && rules.capped);
+    /* An undetermined tip leaves mining under the cap: the strictest limit is
+     * valid whichever way the rules resolve. */
+    struct research_rules_state cap_state = {0};
+    cap_state.active[RESEARCH_RULE_BLOCK_CAP] = rules.capped;
+    BT_CHECK(research_block_size_limit_for(d->chain, &cap_state) == RESEARCH_BLOCK_SIZE_LIMIT);
     struct block_index parent = { .nHeight = 0 };
     rules = research_rules_tip_for_parent(&parent);
     BT_CHECK(!rules.unavailable && !rules.freeze && !rules.capped);
