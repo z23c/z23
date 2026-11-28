@@ -575,22 +575,28 @@ static bool check_first_theta(const struct v6_wire_view *view)
     return !first_theta(view, 2, 10, bad, sizeof bad, false, out, raw) && !memcmp(out, before, 32);
 }
 
-/* The proof tails below are padding: framing consumes only the independently
- * verified public advice prefixes, while requiring the upstream full size. */
-static bool check_stage(const struct v6_wire_view *view, const uint8_t *prefix,
-                        size_t prefix_size, const char *theta)
+/* Public upstream-verified PostNu6_3 statement(s) followed by full proof. */
+static bool check_stage(const struct v6_wire_view *view, const char *path, const char *theta)
 {
     uint8_t basis[IRONWOOD_INSTANCE_ROWS][32], w[32], vk[32], expected[32];
-    uint8_t proof[7264] = {0};
+    uint8_t input[7590], statement[V6_IRONWOOD_STATEMENT_SIZE];
     struct ironwood_postnu63_stage stage, before;
     size_t size = 0;
     if (!load_instance_basis(basis, w) || !zcl_hex_decode(theta, expected, 32) ||
         !zcl_hex_decode("99b4fa5429bf1f72bbba9c1620e201206287d2cc6373012d5bb99fedb7f72205", vk, 32) ||
-        !ironwood_postnu63_proof_size(view->ironwood.count, &size).ok ||
-        size > sizeof proof || prefix_size > size) return false;
-    memcpy(proof, prefix, prefix_size);
+        !ironwood_postnu63_proof_size(view->ironwood.count, &size).ok) return false;
+    size_t statements = (size_t)view->ironwood.count * sizeof statement;
+    if (statements > sizeof input || size > sizeof input - statements) return false;
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    bool loaded = fread(input, 1, statements + size, f) == statements + size && fgetc(f) == EOF;
+    if (fclose(f) != 0 || !loaded) return false;
+    for (uint64_t i = 0; i < view->ironwood.count; ++i)
+        if (!v6_core_ironwood_statement(view, i, statement, sizeof statement) ||
+            memcmp(statement, input + i * sizeof statement, sizeof statement)) return false;
+    uint8_t *proof = input + statements;
     if (!ironwood_postnu63_first_challenge(view, proof, size, vk, basis, w, &stage).ok ||
-        stage.proof.position != prefix_size || memcmp(stage.theta, expected, 32)) return false;
+        stage.proof.position != view->ironwood.count * 320 || memcmp(stage.theta, expected, 32)) return false;
     memcpy(&before, &stage, sizeof before);
     if (ironwood_postnu63_first_challenge(view, proof, size - 1, vk, basis, w, &stage).ok ||
         memcmp(&stage, &before, sizeof stage)) return false;
@@ -611,26 +617,16 @@ static bool check_single_action_stage(void)
         "6c71da563064037986e6282cc4b302e54c73760200e77f748137043f38a5128d8"
         "486c4e8ebb47b915d6fd18ff75929dfb40adf6435ef20fa5eb3bd488c1ba383e"
         "d1b871bbb512c9f13ce8199907951b48bc9ab5db83cd729ae8f2de27c5e514000100";
-    static const char prefix[] =
-        "97b46d53675018cd87223fc9e694dc109807618f171dae09393b705e7a1c0815"
-        "0fa0b472d10f271ae572373baf69514034ddab917436499a2b31d81db7f50984"
-        "2573e5856dca33403c0a88ac0f50f977a8d97601253f10657f5677a6b08a7d98"
-        "385d6aa162e863bd1cee7019b92ba8f610e54e1f45011c3a8b4562ce8ee09387"
-        "032a3c77b525a8aa133167b1b2e07dff37fe218722e225b0f204cd05fa950022"
-        "39066aa7282337ebdf4899946e62d890986b11621e60e71d12dcbb8a3c3cdd15"
-        "decf1615ffcee243fd95d33754d9f25e5094e2307a3c5e70ba8b6c23ded21eb6"
-        "e3bcd4814ee23ff9112842e5822ec07e4ba683af0cbc029690069eb0c45e2585"
-        "e1db86236f4faefd7dfb590bfc439731a3482eb0e8df726a8716e72ee75d0401"
-        "5af1a05f0a8adfb2dba3bc76ec51c367c509b15ae8761c1fbf51bb184e294386";
     enum { START = 26, FLAGS = START + 820, ANCHOR = FLAGS + 9,
            SIZE = ANCHOR + 32 + 1 + 64 + 64 };
-    uint8_t wire[SIZE] = {0}, s[V6_IRONWOOD_STATEMENT_SIZE], bytes[320];
-    if (!zcl_hex_decode(statement, s, sizeof s) || !zcl_hex_decode(prefix, bytes, sizeof bytes)) return false;
+    uint8_t wire[SIZE] = {0}, s[V6_IRONWOOD_STATEMENT_SIZE];
+    if (!zcl_hex_decode(statement, s, sizeof s)) return false;
     memcpy(wire, empty, 25); wire[25] = 1;
     memcpy(wire + START, s + 32, 128); wire[FLAGS] = 6; memcpy(wire + ANCHOR, s, 32);
     struct v6_wire_view view;
     return v6_wire_parse(wire, sizeof wire, &view) == V6_WIRE_OK &&
-        check_stage(&view, bytes, sizeof bytes, "c646b63addb91bb5431ddffc0f0f054c4edcea95143b7006d5fe3f3e6d41000c");
+        check_stage(&view, "tests/fixtures/ironwood/postnu63-coinbase.bin",
+                    "c646b63addb91bb5431ddffc0f0f054c4edcea95143b7006d5fe3f3e6d41000c");
 }
 
 /* Structurally serialized v6 frame using the public funded action slices;
@@ -666,7 +662,7 @@ static bool check_two_action_instance(void)
             return false;
     }
     return check_first_theta(&v) &&
-        check_stage(&v, ironwood_funded_proof_prefix, sizeof ironwood_funded_proof_prefix,
+        check_stage(&v, "tests/fixtures/ironwood/postnu63-funded.bin",
                     "9b4c4db54b5587629516968e6cba32a1c9239bee4c8e5d22dd534b79ed27bc34");
 }
 
