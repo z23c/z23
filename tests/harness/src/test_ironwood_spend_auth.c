@@ -59,15 +59,9 @@ static bool check_binding_keys(const uint8_t cv[2][32])
     return true;
 }
 
-static bool check_binding(void)
+static bool check_binding_refusals(uint8_t cv[2][32], uint8_t sig[64], uint8_t msg[32])
 {
-    uint8_t cv[2][32], sig[64], msg[32], key[32], before[32];
-    if (!zcl_hex_decode("1ab7122ad5e623a7d8cc2ae609bdc36a9416c833a5af2db40378211396f7bd80", cv[0], 32) ||
-        !zcl_hex_decode("ad322be6ba6669192897b02d2322a2914eff0645ef900da1485453345a79ae16", cv[1], 32) ||
-        !zcl_hex_decode("43c027b68d25c52b118a2a83a39a651b84029c824bbe3c01bcc1e8a0e9b98202"
-                        "1107ddbc49f6587fa189de3339a772725fde4789a9203d3ced55f5d71c93470b", sig, 64) ||
-        !zcl_hex_decode("19a61a86bd739ad0ffc008dcc239d68bfe79a6b5d2f2488de17d08059fdc905a", msg, 32) ||
-        !check_binding_keys(cv) || !ironwood_binding_auth_verify(cv, 2, -200000, sig, msg).ok) return false;
+    uint8_t key[32], before[32];
     if (!ironwood_binding_key(cv, 2, -200000, key).ok ||
         ironwood_spend_auth_verify(key, sig, msg).ok ||
         ironwood_binding_auth_verify(cv, 2, 200000, sig, msg).ok) return false;
@@ -81,6 +75,18 @@ static bool check_binding(void)
     return !ironwood_binding_key(cv, 2, -200000, key).ok && !memcmp(key, before, 32) &&
         !ironwood_binding_key(cv, 0, -200000, key).ok &&
         !ironwood_binding_key(cv, SIZE_MAX / 32 + 1, -200000, key).ok && !memcmp(key, before, 32);
+}
+
+static bool check_binding(void)
+{
+    uint8_t cv[2][32], sig[64], msg[32];
+    if (!zcl_hex_decode("1ab7122ad5e623a7d8cc2ae609bdc36a9416c833a5af2db40378211396f7bd80", cv[0], 32) ||
+        !zcl_hex_decode("ad322be6ba6669192897b02d2322a2914eff0645ef900da1485453345a79ae16", cv[1], 32) ||
+        !zcl_hex_decode("43c027b68d25c52b118a2a83a39a651b84029c824bbe3c01bcc1e8a0e9b98202"
+                        "1107ddbc49f6587fa189de3339a772725fde4789a9203d3ced55f5d71c93470b", sig, 64) ||
+        !zcl_hex_decode("19a61a86bd739ad0ffc008dcc239d68bfe79a6b5d2f2488de17d08059fdc905a", msg, 32) ||
+        !check_binding_keys(cv) || !ironwood_binding_auth_verify(cv, 2, -200000, sig, msg).ok) return false;
+    return check_binding_refusals(cv, sig, msg);
 }
 
 int test_ironwood_spend_auth(void)
