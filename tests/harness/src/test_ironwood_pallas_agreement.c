@@ -65,7 +65,7 @@ static bool fixture(const uint8_t ivk[32], const uint8_t wrong[32], const uint8_
         !ironwood_research_pallas_agree(wrong,epk,shared).ok || memcmp(shared,want,32)) return false;
     return !open_note(shared,action,plain);
 }
-/* Public synthetic H244 direct reward. Upstream Orchard 0.16 opens one
+/* Public synthetic H144 direct reward. Upstream Orchard 0.16 opens one
  * Ironwood V3 note for the all-zero test key and rejects the [1;32] key.
  * Transaction SHA256 e5595701e68f6de986cae48161aa05042bf4b1c78b31b8206606934181c44143.
  * This checks agreement and AEAD only; wallet ownership also requires note
