@@ -398,6 +398,7 @@ struct zcl_result replay_verify_run(const char *datadir,
               "\"linkage_failures\":%llu,"
               "\"merkle_failures\":%llu,"
               "\"size_failures\":%llu,"
+              "\"deposit_failures\":%llu,"
               "\"hash_failures\":%llu,"
               "\"first_fail_height\":%lld,"
               "\"first_fail_reason\":\"%s\"",
@@ -410,6 +411,7 @@ struct zcl_result replay_verify_run(const char *datadir,
               (unsigned long long)out->linkage_failures,
               (unsigned long long)out->merkle_failures,
               (unsigned long long)out->size_failures,
+              (unsigned long long)out->deposit_failures,
               (unsigned long long)out->hash_failures,
               (long long)out->first_fail_height,
               out->first_fail_reason ? out->first_fail_reason : "none");
