@@ -63,6 +63,27 @@ struct zcl_result ironwood_postnu63_first_challenge(
     if (result.ok) result = absorb_advice(&next, view->ironwood.count);
     if (result.ok) result = ironwood_halo2_transcript_challenge(&next.transcript, wide, sizeof wide);
     if (result.ok) result = ironwood_halo2_vesta_scalar(wide, sizeof wide, next.theta, sizeof next.theta);
-    if (result.ok) *out = next;
+    if (result.ok) { next.actions = view->ironwood.count; next.phase = IRONWOOD_POSTNU63_THETA; *out = next; }
+    return result;
+}
+
+struct zcl_result ironwood_postnu63_lookup_challenges(struct ironwood_postnu63_stage *stage)
+{
+    if (!stage || stage->phase != IRONWOOD_POSTNU63_THETA || !stage->actions ||
+        stage->actions > SIZE_MAX / 320 || stage->proof.position != (size_t)stage->actions * 320)
+        return ZCL_ERR(-1, "Invalid PostNu6_3 lookup stage");
+    struct ironwood_postnu63_stage next = *stage;
+    next.lookup_offset = next.proof.position;
+    uint8_t affine[64], wide[64];
+    struct zcl_result result = ZCL_OK;
+    for (uint64_t i = 0; result.ok && i < next.actions; ++i)
+        for (size_t j = 0; result.ok && j < 6; ++j)
+            result = ironwood_halo2_read_point(&next.transcript, &next.proof, affine, sizeof affine);
+    next.lookup_size = next.proof.position - next.lookup_offset;
+    if (result.ok) result = ironwood_halo2_transcript_challenge(&next.transcript, wide, sizeof wide);
+    if (result.ok) result = ironwood_halo2_vesta_scalar(wide, sizeof wide, next.beta, sizeof next.beta);
+    if (result.ok) result = ironwood_halo2_transcript_challenge(&next.transcript, wide, sizeof wide);
+    if (result.ok) result = ironwood_halo2_vesta_scalar(wide, sizeof wide, next.gamma, sizeof next.gamma);
+    if (result.ok) { next.phase = IRONWOOD_POSTNU63_BETA_GAMMA; *stage = next; }
     return result;
 }

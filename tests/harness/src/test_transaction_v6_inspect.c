@@ -628,6 +628,38 @@ static bool stage_refusals(struct v6_wire_view *full, uint8_t *wire, size_t size
     return !ironwood_postnu63_proof_size(UINT64_MAX, &size).ok && size == saved;
 }
 
+/* Challenges from the pinned upstream 0.4.0 verifier trace for each proof. */
+static bool check_lookup_stage(struct ironwood_postnu63_stage *stage, uint8_t *wire)
+{
+    static const char *const beta[] = {
+        "1b6a36e4d9361552dc592493d87e3570d0fcb8ed44b81727c4780d9ad73a3b36",
+        "8a03d35c2b5547a838e80fa0d0e2a74a3a274758025c1f382035bd8af31ee726"};
+    static const char *const gamma[] = {
+        "973504d5f2f8e6bf4896eb0a60aa7c894f4bf5fb73eb29b1a431e213dda4393f",
+        "35d7dea4c45b405f44e0b08be51a01de556790d375a158ba97e29e23b960e42f"};
+    uint64_t count = stage->actions;
+    if (!count || count > 2) return false;
+    uint8_t b[32], g[32], swap[32];
+    if (!zcl_hex_decode(beta[count - 1], b, 32) || !zcl_hex_decode(gamma[count - 1], g, 32)) return false;
+    struct ironwood_postnu63_stage before, short_stage, failed;
+    memcpy(&before, stage, sizeof before);
+    short_stage = before; short_stage.proof.length = short_stage.proof.position + 6 * (size_t)count * 32 - 1;
+    memcpy(&failed, &short_stage, sizeof failed);
+    if (ironwood_postnu63_lookup_challenges(&short_stage).ok || memcmp(&short_stage, &failed, sizeof failed))
+        return false;
+    if (!ironwood_postnu63_lookup_challenges(stage).ok || stage->lookup_offset != count * 320 ||
+        stage->lookup_size != count * 192 || stage->proof.position != count * 512 ||
+        memcmp(stage->beta, b, 32) || memcmp(stage->gamma, g, 32)) return false;
+    memcpy(&failed, stage, sizeof failed);
+    if (ironwood_postnu63_lookup_challenges(stage).ok || memcmp(stage, &failed, sizeof failed)) return false;
+    size_t start = (size_t)(before.proof.buffer - wire) + before.proof.position;
+    memcpy(swap, wire + start, 32); memcpy(wire + start, wire + start + 32, 32);
+    memcpy(wire + start + 32, swap, 32);
+    bool ok = ironwood_postnu63_lookup_challenges(&before).ok && memcmp(before.beta, b, 32);
+    memcpy(wire + start + 32, wire + start, 32); memcpy(wire + start, swap, 32);
+    return ok;
+}
+
 /* Public upstream-verified PostNu6_3 statement(s) followed by full proof. */
 static bool check_stage(const struct v6_wire_view *view, const char *path, const char *theta)
 {
@@ -641,7 +673,7 @@ static bool check_stage(const struct v6_wire_view *view, const char *path, const
         !stage_fixture(view, path, input, size) || !stage_wire(view, input, size, wire, sizeof wire, &full) ||
         !ironwood_postnu63_first_challenge(&full, vk, basis, w, &stage).ok ||
         stage.proof.position != view->ironwood.count * 320 || memcmp(stage.theta, expected, 32)) return false;
-    return stage_refusals(&full, wire, size, vk, basis, w, &stage);
+    return check_lookup_stage(&stage, wire) && stage_refusals(&full, wire, size, vk, basis, w, &stage);
 }
 
 /* Public coinbase fixture: Orchard 0.16.0 PostNu6_3, R1 evidence

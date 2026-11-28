@@ -10,10 +10,14 @@
 #include <stdint.h>
 
 struct v6_wire_view;
+enum ironwood_postnu63_phase { IRONWOOD_POSTNU63_THETA = 1, IRONWOOD_POSTNU63_BETA_GAMMA };
 struct ironwood_postnu63_stage {
     struct ironwood_halo2_transcript transcript;
     struct zcl_codec_reader proof;
-    uint8_t theta[32];
+    uint8_t theta[32], beta[32], gamma[32];
+    uint64_t actions;
+    size_t lookup_offset, lookup_size;
+    enum ironwood_postnu63_phase phase;
 };
 /* Orchard 0.16.0 PostNu6_3 canonical proof size, with checked arithmetic. */
 struct zcl_result ironwood_postnu63_proof_size(uint64_t count, size_t *out);
@@ -24,4 +28,9 @@ struct zcl_result ironwood_postnu63_proof_size(uint64_t count, size_t *out);
 struct zcl_result ironwood_postnu63_first_challenge(
     const struct v6_wire_view *view, const uint8_t vk[32], const uint8_t basis[IRONWOOD_INSTANCE_ROWS][32],
     const uint8_t w[32], struct ironwood_postnu63_stage *out);
+/* Read the three input/table lookup pairs per action, then squeeze beta
+ * and gamma. The stage and cursor are unchanged on failure. The retained
+ * proof bytes at lookup_offset/lookup_size are public compressed points.
+ * This only frames input and does not verify the proof. */
+struct zcl_result ironwood_postnu63_lookup_challenges(struct ironwood_postnu63_stage *stage);
 #endif
