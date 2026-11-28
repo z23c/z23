@@ -205,7 +205,16 @@ static bool corruption_refused(struct session_fixture *f)
 int test_utxo_apply_ironwood_session(void)
 {
     struct session_fixture f = {0};
-    bool ok = fixture_init(&f) && readonly_refusal(&f) && genesis_cases(&f) && first_transaction(&f) && cold_replay(&f) && partial_empty_refused(&f) && partial_populated_refused(&f) && corruption_refused(&f);
+    const struct { const char *name; bool (*run)(struct session_fixture *); } cases[] = {
+        {"fixture", fixture_init}, {"readonly", readonly_refusal}, {"genesis", genesis_cases},
+        {"first transaction", first_transaction}, {"cold replay", cold_replay},
+        {"partial empty", partial_empty_refused}, {"partial populated", partial_populated_refused},
+        {"corruption", corruption_refused},
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+        if (!cases[i].run(&f)) { fprintf(stderr, "Ironwood session: %s failed\n", cases[i].name); ok = false; break; }
+    }
     utxo_ironwood_session_reset();
     if (f.db && sqlite3_close(f.db) != SQLITE_OK) ok = false;
     for (size_t i = 0; i < 4; ++i) block_free(&f.bodies[i]);
