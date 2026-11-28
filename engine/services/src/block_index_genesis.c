@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
  * purpose: Persist and verify the selected network's genesis body before advertising its data. */
+// one-result-type-ok:foreign-genesis-identity-predicates
 #include "services/block_index_loader.h"
 #include "block_index_genesis_internal.h"
 #include "chain/chain.h"

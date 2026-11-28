@@ -447,6 +447,30 @@ done:
     return *failures - start_failures;
 }
 
+static void check_research_genesis_projection(int *failures, const char *dir,
+    const struct chain_research_descriptor *profile, block_index_projection_t *bip,
+    const struct uint256 *child)
+{
+    progress_store_close();
+    bool progress_open = progress_store_open(dir);
+    sqlite3 *progress = progress_store_db();
+    bool seeded = progress && bir_seed_tip_cursor(progress, 1, child);
+    BIR_CHECK("research: durable tip fixture seeded", progress_open && seeded);
+    struct main_state ms; main_state_init(&ms);
+    bool ok = load_block_index_from_projection(&ms, profile->chain, bip, progress).ok;
+    struct block_index *g = block_map_find(&ms.map_block_index, &profile->chain->consensus.hashGenesisBlock);
+    struct block_index *c = block_map_find(&ms.map_block_index, child);
+    struct arith_uint256 expected = {0};
+    if (g && c) { struct arith_uint256 proof = GetBlockProof(c); arith_uint256_add(&expected, &g->nChainWork, &proof); }
+    BIR_CHECK("research: genesis body verified before forward pass",
+              ok && g && c && (g->nStatus & BLOCK_HAVE_DATA) && c->pprev == g &&
+              arith_uint256_compare(&c->nChainWork, &expected) == 0);
+    BIR_CHECK("research: projection never publishes durable tip",
+              seeded && active_chain_cached_tip(&ms.chain_active) == NULL);
+    main_state_free(&ms);
+    progress_store_close();
+}
+
 static void run_research_genesis_projection(int *failures)
 {
     const struct chain_research_descriptor *profile = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
@@ -474,24 +498,8 @@ static void run_research_genesis_projection(int *failures)
     block_index_projection_t *bip = block_index_projection_open(dbpath, log);
     BIR_CHECK("research: projection opens", bip != NULL);
     if (bip) {
-        progress_store_close();
-        bool progress_open = progress_store_open(dir);
-        sqlite3 *progress = progress_store_db();
-        bool seeded = progress && bir_seed_tip_cursor(progress, 1, &child);
-        BIR_CHECK("research: durable tip fixture seeded", progress_open && seeded);
-        struct main_state ms; main_state_init(&ms);
-        bool ok = load_block_index_from_projection(&ms, profile->chain, bip, progress).ok;
-        struct block_index *g = block_map_find(&ms.map_block_index, &profile->chain->consensus.hashGenesisBlock);
-        struct block_index *c = block_map_find(&ms.map_block_index, &child);
-        struct arith_uint256 expected = {0};
-        if (g && c) { struct arith_uint256 proof = GetBlockProof(c); arith_uint256_add(&expected, &g->nChainWork, &proof); }
-        BIR_CHECK("research: genesis body verified before forward pass",
-                  ok && g && c && (g->nStatus & BLOCK_HAVE_DATA) && c->pprev == g &&
-                  arith_uint256_compare(&c->nChainWork, &expected) == 0);
-        BIR_CHECK("research: projection never publishes durable tip",
-                  seeded && active_chain_cached_tip(&ms.chain_active) == NULL);
-        main_state_free(&ms); block_index_projection_close(bip);
-        progress_store_close();
+        check_research_genesis_projection(failures, dir, profile, bip, &child);
+        block_index_projection_close(bip);
     }
     event_log_close(log);
 done:

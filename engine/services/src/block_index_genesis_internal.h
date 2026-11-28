@@ -1,3 +1,4 @@
+/* purpose: Share foreign-genesis identity checks between block index loaders. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #ifndef ZCL_BLOCK_INDEX_GENESIS_INTERNAL_H
 #define ZCL_BLOCK_INDEX_GENESIS_INTERNAL_H

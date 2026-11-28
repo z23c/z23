@@ -438,6 +438,26 @@ static bool projection_genesis_preflight(struct main_state *ms, const struct cha
            !check.foreign;
 }
 
+static struct zcl_result projection_forward_pass(struct main_state *ms)
+{
+    size_t count = ms->map_block_index.size;
+    struct block_index **sorted = zcl_malloc(
+        count * sizeof(struct block_index *), "projection sorted");
+    if (!sorted)
+        return ZCL_ERR(-5, "load_block_index_from_projection: malloc failed "
+                       "for %zu entries", count);
+    size_t idx = 0, iter = 0;
+    struct block_index *pi;
+    while (block_map_next(&ms->map_block_index, &iter, NULL, &pi)) {
+        if (pi && idx < count)
+            sorted[idx++] = pi;
+    }
+    qsort(sorted, idx, sizeof(struct block_index *), rebuild_cmp_height);
+    block_index_forward_pass(sorted, idx);
+    free(sorted);
+    return ZCL_OK;
+}
+
 struct zcl_result load_block_index_from_projection(struct main_state *ms,
                                       const struct chain_params *params,
                                       struct block_index_projection *bip,
@@ -495,22 +515,7 @@ struct zcl_result load_block_index_from_projection(struct main_state *ms,
 
     /* (4) Forward pass: nChainWork, nChainTx, skip links, branch id,
      * failed-child propagation — identical to load_block_index post-load. */
-    size_t count = ms->map_block_index.size;
-    struct block_index **sorted = zcl_malloc(
-        count * sizeof(struct block_index *), "projection sorted");
-    if (!sorted)
-        return ZCL_ERR(-5, "load_block_index_from_projection: malloc failed "
-                       "for %zu entries", count);
-    size_t idx = 0, iter = 0;
-    struct block_index *pi;
-    while (block_map_next(&ms->map_block_index, &iter, NULL, &pi)) {
-        if (pi && idx < count)
-            sorted[idx++] = pi;
-    }
-    count = idx;
-    qsort(sorted, count, sizeof(struct block_index *), rebuild_cmp_height);
-    block_index_forward_pass(sorted, count);
-    free(sorted);
+    ZCL_CHECK(projection_forward_pass(ms));
 
     int64_t elapsed = (int64_t)platform_time_wall_time_t() - t0;
     printf("Block index projection: folded %zu entries in %llds\n",
