@@ -308,6 +308,19 @@ static bool check_commitment_refusals(const struct ironwood_instance_rows *rows,
     return !ironwood_instance_commitment(&bad, basis, w, out).ok && !memcmp(out, saved, 32);
 }
 
+static bool check_commitment_cancellation(uint8_t basis[IRONWOOD_INSTANCE_ROWS][32],
+                                           const uint8_t w[32])
+{
+    struct ironwood_instance_rows rows = {0};
+    uint8_t saved[32], out[32], identity[32] = {0};
+    memcpy(saved, basis[0], 32);
+    memcpy(basis[0], w, 32); basis[0][31] ^= 0x80;
+    rows.row[0][0] = 1;
+    bool ok = ironwood_instance_commitment(&rows, basis, w, out).ok && !memcmp(out, identity, 32);
+    memcpy(basis[0], saved, 32);
+    return ok;
+}
+
 /* Pinned upstream Halo2 0.4.0 k=11 basis and funded two-action transcript;
  * R1 ironwood-instance-commit.kRFCL9qn/{basis-11-and-w.hex,commitments.txt}. */
 static bool check_instance_commitment(const struct ironwood_instance_rows *rows, const char *want)
@@ -334,7 +347,7 @@ static bool check_instance_commitment(const struct ironwood_instance_rows *rows,
     uint8_t zero_result[32];
     if (!ironwood_instance_commitment(&zero, basis, w, zero_result).ok ||
         memcmp(zero_result, w, 32)) return false;
-    return check_commitment_refusals(rows, basis, w, out);
+    return check_commitment_cancellation(basis, w) && check_commitment_refusals(rows, basis, w, out);
 }
 
 /* Funded reopened spend, Orchard 0.16.0 PostNu6_3 to_halo2_instance;

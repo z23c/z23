@@ -76,18 +76,13 @@ struct zcl_result ironwood_instance_commitment(const struct ironwood_instance_ro
                                                 const uint8_t w[32], uint8_t out[32])
 {
     if (!rows || !basis || !w || !out) return ZCL_ERR(-1, "Missing Ironwood commitment input");
-    /* Vesta base field Fq; scalar validation above uses its distinct Fp. */
-    uint8_t modulus[32];
-    struct zcl_result result = ironwood_pasta_vesta_modulus(modulus);
-    if (!result.ok) return result;
-    BN_CTX *ctx = BN_CTX_new(); BIGNUM *prime = BN_lebin2bn(modulus, 32, NULL);
-    BIGNUM *zero = BN_new(), *five = BN_new(), *n = BN_new();
+    BN_CTX *ctx = BN_CTX_new(); BIGNUM *n = BN_new();
     EC_GROUP *group = NULL; EC_POINT *sum = NULL, *point = NULL, *term = NULL;
-    bool ok = ctx && prime && zero && five && n && BN_set_word(five, 5);
-    if (ok) { group = EC_GROUP_new_curve_GFp(prime, zero, five, ctx); ok = group != NULL; }
-    if (ok) { sum = EC_POINT_new(group); point = EC_POINT_new(group); term = EC_POINT_new(group);
-              ok = sum && point && term; }
-    result = ok ? ZCL_OK : ZCL_ERR(-1, "Cannot initialize Vesta group");
+    struct zcl_result result = ironwood_pasta_group(IRONWOOD_VESTA, ctx, &group);
+    if (result.ok) {
+        sum = EC_POINT_new(group); point = EC_POINT_new(group); term = EC_POINT_new(group);
+        if (!n || !sum || !point || !term) result = ZCL_ERR(-1, "Cannot allocate Vesta points");
+    }
     if (result.ok) result = ironwood_pasta_decode(w, IRONWOOD_VESTA, false, group, sum, ctx);
     for (size_t i = 0; result.ok && i < IRONWOOD_INSTANCE_ROWS; ++i)
         result = commitment_add(group, sum, basis[i], rows->row[i], point, term, n, ctx);
@@ -95,6 +90,6 @@ struct zcl_result ironwood_instance_commitment(const struct ironwood_instance_ro
     if (result.ok) result = commitment_encode(group, sum, ctx, encoded);
     if (result.ok) memcpy(out, encoded, sizeof encoded);
     EC_POINT_free(term); EC_POINT_free(point); EC_POINT_free(sum); EC_GROUP_free(group);
-    BN_free(n); BN_free(five); BN_free(zero); BN_free(prime); BN_CTX_free(ctx);
+    BN_free(n); BN_CTX_free(ctx);
     return result;
 }

@@ -7,7 +7,8 @@
 #include <stdint.h>
 enum ironwood_pasta_curve { IRONWOOD_PALLAS, IRONWOOD_VESTA };
 struct zcl_result ironwood_pasta_fp_canonical(const uint8_t bytes[32]);
-struct zcl_result ironwood_pasta_vesta_modulus(uint8_t out[32]);
+struct zcl_result ironwood_pasta_group(enum ironwood_pasta_curve curve, BN_CTX *ctx,
+                                       EC_GROUP **out);
 /* group and point must be initialized for the specified curve. */
 struct zcl_result ironwood_pasta_decode(const uint8_t bytes[32], enum ironwood_pasta_curve curve,
                                         bool allow_identity, const EC_GROUP *group,
