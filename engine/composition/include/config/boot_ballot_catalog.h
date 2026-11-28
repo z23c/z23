@@ -6,4 +6,6 @@
 struct app_context;
 /* Called after chain selection and datadir locking, before network services. */
 bool boot_ballot_catalog_load(struct app_context *ctx);
+/* Select the profile named by ctx->testnet_profile; Windows supports none. */
+bool boot_research_profile_select(const struct app_context *ctx);
 #endif

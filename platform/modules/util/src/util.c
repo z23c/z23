@@ -412,8 +412,9 @@ static void AppendNetworkDataDir(char *path, size_t path_size)
 {
     const struct base_chain_params *bp = BaseParams();
     /* Research startup passes the final profile directory to every subsystem.
-     * No research profile can be selected on Windows (its storage path is
-     * resolved by POSIX-only code), and that lookup is not linked there. */
+     * Windows supports no research profile (boot_research_profile_select
+     * refuses it there), and the Windows acceptance programs that compile
+     * this file do not link chain_research_profile_current. */
 #if !defined(_WIN32)
     if (chain_research_profile_current() || !bp || !bp->strDataDir[0])
         return;

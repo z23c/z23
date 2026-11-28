@@ -42,3 +42,17 @@ bool boot_ballot_catalog_load(struct app_context *ctx)
     ctx->ballot_catalog_pin_present = true;
     return true;
 }
+
+/* The one boot-time selection of a research profile. Windows supports none:
+ * main.c refuses the selector there and this refuses it again at the boot
+ * entry, so no Windows link owes the selector a definition. */
+bool boot_research_profile_select(const struct app_context *ctx)
+{
+#if defined(_WIN32)
+    (void)ctx;
+    fprintf(stderr, "FATAL: the research profile is not supported on Windows\n");
+    return false;
+#else
+    return chain_research_profile_select(ctx->testnet_profile->id);
+#endif
+}

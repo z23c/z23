@@ -410,7 +410,7 @@ static bool boot_step_init_observability(void)
 static bool boot_step_select_chain_and_datadir(struct app_context *ctx)
 {
     if (ctx->testnet_profile) {
-        if (!chain_research_profile_select(ctx->testnet_profile->id)) {
+        if (!boot_research_profile_select(ctx)) {
             fprintf(stderr, "FATAL: unable to select the requested test network\n");
             return false;
         }
