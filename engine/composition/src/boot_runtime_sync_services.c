@@ -64,6 +64,9 @@ bool boot_header_probe_start(void *ctx)
     struct boot_svc_ctx *svc = ctx;
     if (!svc)
         return false;
+    /* An isolated research network must not load or contact the public oracle. */
+    if (chain_research_profile_current())
+        return true;
     struct header_probe_config cfg = {0};
     /* Keep header_probe initialized/running for diagnostics and manual
      * use, but leave lockstep catch-up ownership with legacy_mirror. */
@@ -86,8 +89,8 @@ bool boot_header_probe_start(void *ctx)
      * headers into a regtest chain every 30 s, and it is an outbound dial into
      * the operator's live daemon from a fixture that was supposed to be sealed.
      * Measured: two dials in a 75 s `-regtest` fixture run. The init above
-     * stays on every network (it dials nothing; it keeps the RPC + dumpstate
-     * introspection available); only the polling dial is gated. */
+     * stays on ordinary networks (it dials nothing; it keeps the RPC +
+     * dumpstate introspection available); only the polling dial is gated. */
     const char *net = boot_nonmain_network_name(svc);
     if (net) {
         printf("[header-probe] poll Job skipped on %s (it polls a mainnet "

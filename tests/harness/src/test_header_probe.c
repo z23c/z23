@@ -14,6 +14,7 @@
 
 #include "test/test_core.h"
 #include "services/header_probe.h"
+#include "config/boot_internal.h"
 #include "controllers/wallet_helpers.h"
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
@@ -390,6 +391,50 @@ void hp_conf_drop(struct hp_conf *c);
 bool hp_state_is_pristine(void);
 int header_probe_state_tests(void);
 
+static int hp_boot_research_isolation(void)
+{
+    int failures = 0;
+    struct hp_conf conf = {0};
+    struct hp_mock srv;
+    header_probe_reset_for_test();
+    HP_CHECK("isolated RPC fixture starts", hp_mock_start(&srv, 0, false));
+    if (failures) return failures;
+    hp_mock_stop(&srv);
+    char text[96];
+    snprintf(text, sizeof(text), "rpcuser=u\nrpcpassword=p\nrpcport=%d\n", srv.port);
+    HP_CHECK("isolated RPC credentials written", hp_conf_write(&conf, text));
+    if (!conf.set) {
+        hp_conf_drop(&conf);
+        return failures;
+    }
+    const struct chain_params *original = chain_params_get();
+    enum chain_network original_network = strcmp(original->strNetworkID, "regtest") == 0
+        ? CHAIN_REGTEST : strcmp(original->strNetworkID, "test") == 0
+        ? CHAIN_TESTNET : CHAIN_MAIN;
+    HP_CHECK("research profile selected", chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    struct boot_svc_ctx svc = { .state = &g_hp_ms, .params = chain_params_get() };
+    int64_t calls = hp_dump_int("calls_total");
+    HP_CHECK("research boot succeeds", boot_header_probe_start(&svc));
+    HP_CHECK("research probe remains unconfigured", !header_probe_oracle_configured());
+    struct zcl_result r = header_probe_pull_range(1, 10, NULL);
+    HP_CHECK("research pull is not initialized",
+             !r.ok && r.code == -2 && strstr(r.message, "not initialized"));
+    HP_CHECK("research pull leaves calls unchanged",
+             calls != INT64_MIN && hp_dump_int("calls_total") == calls);
+
+    chain_params_select(CHAIN_TESTNET);
+    svc.params = chain_params_get();
+    HP_CHECK("ordinary boot succeeds", boot_header_probe_start(&svc));
+    r = header_probe_pull_range(1, 10, NULL);
+    HP_CHECK("ordinary pull reaches unreachable RPC path",
+             r.ok && hp_dump_int("calls_total") == calls + 1 &&
+             hp_dump_int("rpc_errors") == 1);
+    header_probe_reset_for_test();
+    chain_params_select(original_network);
+    hp_conf_drop(&conf);
+    return failures;
+}
+
 /* ── Scenario table: pull and tick counts observed through the mock ──
  *
  * A malformed header makes a whole batch fail to decode, which adds exactly
@@ -704,6 +749,7 @@ int test_header_probe(void)
                "SKIPPING (set up params before running this test)\n");
         return 0;
     }
+    failures += hp_boot_research_isolation();
 
     /* Test 1: pull_range with happy-path mock — calls bump, but
      * accept_block_header rejects the synthetic header (no checkpoint
