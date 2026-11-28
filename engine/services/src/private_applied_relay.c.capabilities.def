@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+ZCL_MODULE_CAPABILITY("engine/services/src/private_applied_relay.c", CAP_FS_WRITE, "Checked peer receipt allocation reports failures to stderr.")
