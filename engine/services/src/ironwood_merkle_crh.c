@@ -68,11 +68,18 @@ static enum addition_status hash_points(const EC_GROUP *g, BN_CTX *ctx, EC_POINT
     EC_POINT_free(neg); EC_POINT_free(tmp); EC_POINT_free(s);
     return result;
 }
+static bool merkle_inputs_valid(unsigned level, const uint8_t left[32], const uint8_t right[32],
+                                const uint8_t *parameters, size_t parameters_size, const uint8_t *out)
+{
+    return left && right && out && level < 32 &&
+        ironwood_merkle_parameters_valid(parameters, parameters_size) &&
+        ironwood_pasta_fp_canonical(left).ok && ironwood_pasta_fp_canonical(right).ok;
+}
+
 struct zcl_result ironwood_merkle_crh(unsigned level, const uint8_t left[32],
     const uint8_t right[32], const uint8_t *parameters, size_t parameters_size, uint8_t out[32])
 {
-    if (!left || !right || !out || level >= 32 || !ironwood_merkle_parameters_valid(parameters, parameters_size) ||
-        !ironwood_pasta_fp_canonical(left).ok || !ironwood_pasta_fp_canonical(right).ok)
+    if (!merkle_inputs_valid(level, left, right, parameters, parameters_size, out))
         return ZCL_ERR(-1, "Invalid Ironwood MerkleCRH input");
     BN_CTX *ctx = BN_CTX_new(); EC_GROUP *g = NULL;
     bool ok = ctx && ironwood_pasta_group(IRONWOOD_PALLAS, ctx, &g).ok;
