@@ -36,6 +36,52 @@ static bool pin_write(const char *path, const char *bytes, size_t n)
     return ok;
 }
 
+/* Load the tracked release ballot through the real digest-bound loader. */
+static int selected_release_catalog_cases(void)
+{
+    static const char expected[] =
+        "bb447e1ae3827c976f4ff08a5b5ac7379fa486ce1bc13480f3e9db7e0dc733af";
+    static const char mismatch[] =
+        "ab447e1ae3827c976f4ff08a5b5ac7379fa486ce1bc13480f3e9db7e0dc733af";
+    static const char genesis_hex[] =
+        "e7788cffdd6cf6b0065d7a215345acb895173f319b1a5dd0b877b3420baaad0e";
+    uint8_t genesis[32], expected_bytes[32];
+    CAT_CHECK(zcl_hex_decode(genesis_hex, genesis, sizeof(genesis)));
+    CAT_CHECK(zcl_hex_decode(expected, expected_bytes, sizeof(expected_bytes)));
+    FILE *f = fopen("tests/fixtures/ironwood/selected-manifest.json", "rb");
+    CAT_CHECK(f);
+    char manifest[225];
+    size_t n = fread(manifest, 1, sizeof(manifest), f);
+    bool ok = !ferror(f) && n == 224 && feof(f);
+    CAT_CHECK(fclose(f) == 0 && ok);
+    char dir[512], ballots[600], path[720], wrong_path[720];
+    CAT_CHECK(test_mkdtemp(dir, sizeof(dir), "selected_ballot_pin"));
+    CAT_CHECK(snprintf(ballots, sizeof(ballots), "%s/ballots", dir) > 0);
+    CAT_CHECK(mkdir(ballots, 0700) == 0);
+    CAT_CHECK(snprintf(path, sizeof(path), "%s/%s.json", ballots, expected) > 0);
+    CAT_CHECK(snprintf(wrong_path, sizeof(wrong_path), "%s/%s.json", ballots, mismatch) > 0);
+    CAT_CHECK(pin_write(path, manifest, n) && pin_write(wrong_path, manifest, n));
+    struct miner_signal_catalog_pin pin = {0};
+    CAT_CHECK(miner_signal_catalog_pin_load(dir, expected, genesis, &pin).ok);
+    struct miner_signal_schedule first = {0}, second = {0};
+    CAT_CHECK(miner_signal_catalog_pin_select(&pin, 0, &first).ok);
+    CAT_CHECK(miner_signal_catalog_pin_select(&pin, 1, &second).ok);
+    CAT_CHECK(first.start == 121 && first.window == 20 && first.activation == 143 &&
+              first.slot == 0 && first.slots == 2);
+    CAT_CHECK(second.start == 121 && second.window == 20 && second.activation == 144 &&
+              second.slot == 1 && second.slots == 2);
+    CAT_CHECK(miner_signal_required_votes(first.window) == 19 &&
+              miner_signal_required_votes(second.window) == 19);
+    CAT_CHECK(!memcmp(first.catalog, expected_bytes, 32) &&
+              !memcmp(second.catalog, expected_bytes, 32));
+    struct miner_signal_catalog_pin before = pin;
+    CAT_CHECK(!miner_signal_catalog_pin_load(dir, mismatch, genesis, &pin).ok);
+    CAT_CHECK(!memcmp(&pin, &before, sizeof(pin)));
+    CAT_CHECK(unlink(path) == 0 && unlink(wrong_path) == 0 && rmdir(ballots) == 0);
+    test_cleanup_tmpdir(dir);
+    return 0;
+}
+
 static int catalog_pin_cases(void)
 {
     static const char manifest[] =
@@ -230,6 +276,7 @@ int test_miner_signal_catalog(void)
     CAT_CHECK(b.slots == 256 && b.slot == 255 && b.activation == 122);
 #if !defined(_WIN32)
     CAT_CHECK(catalog_pin_cases() == 0);
+    CAT_CHECK(selected_release_catalog_cases() == 0);
 #endif
     puts("miner_signal_catalog: vector, slot binding, mutations and rejection passed");
     return 0;
