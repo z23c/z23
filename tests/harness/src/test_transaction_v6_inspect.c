@@ -431,17 +431,11 @@ static bool check_funded_second_instance(void)
         check_instance_commitment(&got, "273cf53ff47191c5a7a25ba8e3a8df751b1b4933500b3653ff54ccd8b94f95a0");
 }
 
-/* Frames public inputs and advice points only; this is not proof verification. */
-static bool first_theta(const struct v6_wire_view *view, size_t count, size_t advice_columns,
-                        const uint8_t *proof, size_t proof_size, bool reverse, uint8_t out[32])
+static bool absorb_instances(struct ironwood_halo2_transcript *t, const struct v6_wire_view *view,
+                             size_t count, bool reverse)
 {
-    uint8_t basis[IRONWOOD_INSTANCE_ROWS][32], w[32], vk[32], affine[64], wide[64], value[32];
-    struct ironwood_halo2_transcript t;
-    struct zcl_codec_reader reader;
-    if (!load_instance_basis(basis, w) ||
-        !zcl_hex_decode("99b4fa5429bf1f72bbba9c1620e201206287d2cc6373012d5bb99fedb7f72205", vk, 32) ||
-        !ironwood_halo2_transcript_init(&t).ok || !ironwood_halo2_transcript_scalar(&t, vk, 32).ok)
-        return false;
+    uint8_t basis[IRONWOOD_INSTANCE_ROWS][32], w[32], affine[64];
+    if (!load_instance_basis(basis, w)) return false;
     for (size_t i = 0; i < count; ++i) {
         struct ironwood_instance_rows rows;
         uint8_t commitment[32];
@@ -450,9 +444,22 @@ static bool first_theta(const struct v6_wire_view *view, size_t count, size_t ad
         if (!ironwood_instance_project(view, action, &rows).ok ||
             !ironwood_instance_commitment(&rows, basis, w, commitment).ok) return false;
         zcl_codec_reader_init(&input, commitment, sizeof commitment);
-        if (!ironwood_halo2_read_point(&t, &input, affine, sizeof affine).ok || input.position != 32)
+        if (!ironwood_halo2_read_point(t, &input, affine, sizeof affine).ok || input.position != 32)
             return false;
     }
+    return true;
+}
+
+/* Frames public inputs and advice points only; this is not proof verification. */
+static bool first_theta(const struct v6_wire_view *view, size_t count, size_t advice_columns,
+                        const uint8_t *proof, size_t proof_size, bool reverse, uint8_t out[32], uint8_t raw[64])
+{
+    uint8_t vk[32], affine[64], wide[64], value[32];
+    struct ironwood_halo2_transcript t;
+    struct zcl_codec_reader reader;
+    if (!zcl_hex_decode("99b4fa5429bf1f72bbba9c1620e201206287d2cc6373012d5bb99fedb7f72205", vk, 32) ||
+        !ironwood_halo2_transcript_init(&t).ok || !ironwood_halo2_transcript_scalar(&t, vk, 32).ok ||
+        !absorb_instances(&t, view, count, reverse)) return false;
     zcl_codec_reader_init(&reader, proof, proof_size);
     for (size_t i = 0; i < count; ++i)
         for (size_t j = 0; j < advice_columns; ++j)
@@ -460,22 +467,25 @@ static bool first_theta(const struct v6_wire_view *view, size_t count, size_t ad
     if (reader.position != proof_size || !ironwood_halo2_transcript_challenge(&t, wide, sizeof wide).ok ||
         !ironwood_halo2_vesta_scalar(wide, sizeof wide, value, sizeof value).ok) return false;
     memcpy(out, value, sizeof value);
+    memcpy(raw, wide, sizeof wide);
     return true;
 }
 
+
 static bool check_first_theta(const struct v6_wire_view *view)
 {
-    uint8_t expected[32], out[32], before[32], bad[sizeof ironwood_funded_proof_prefix];
-    if (!zcl_hex_decode("9b4c4db54b5587629516968e6cba32a1c9239bee4c8e5d22dd534b79ed27bc34", expected, 32) ||
-        !first_theta(view, 2, 10, ironwood_funded_proof_prefix, sizeof ironwood_funded_proof_prefix, false, out) ||
-        memcmp(out, expected, 32)) return false;
-    if (!first_theta(view, 2, 10, ironwood_funded_proof_prefix, sizeof ironwood_funded_proof_prefix, true, out) ||
+    uint8_t expected[32], out[32], before[32], raw[64], want_raw[64], bad[sizeof ironwood_funded_proof_prefix];
+    if (!zcl_hex_decode("ca5cf9dd47e21fa547c0f57b93a99b02586bd3af07358dfcf90143e5947f9c50a23ab46f1103d9d7ca878c0f062cea610551b05f107c61280fe82cb6ad263e76", want_raw, 64) ||
+        !zcl_hex_decode("9b4c4db54b5587629516968e6cba32a1c9239bee4c8e5d22dd534b79ed27bc34", expected, 32) ||
+        !first_theta(view, 2, 10, ironwood_funded_proof_prefix, sizeof ironwood_funded_proof_prefix, false, out, raw) ||
+        memcmp(out, expected, 32) || memcmp(raw, want_raw, 64)) return false;
+    if (!first_theta(view, 2, 10, ironwood_funded_proof_prefix, sizeof ironwood_funded_proof_prefix, true, out, raw) ||
         !memcmp(out, expected, 32)) return false;
     memset(out, 0xa5, sizeof out); memcpy(before, out, sizeof out);
-    if (first_theta(view, 2, 10, ironwood_funded_proof_prefix, sizeof ironwood_funded_proof_prefix - 1, false, out) ||
+    if (first_theta(view, 2, 10, ironwood_funded_proof_prefix, sizeof ironwood_funded_proof_prefix - 1, false, out, raw) ||
         memcmp(out, before, 32)) return false;
     memcpy(bad, ironwood_funded_proof_prefix, sizeof bad); memset(bad, 0, 32);
-    return !first_theta(view, 2, 10, bad, sizeof bad, false, out) && !memcmp(out, before, 32);
+    return !first_theta(view, 2, 10, bad, sizeof bad, false, out, raw) && !memcmp(out, before, 32);
 }
 
 /* Structurally serialized v6 frame using the public funded action slices;
