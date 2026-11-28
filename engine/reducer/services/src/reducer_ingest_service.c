@@ -828,7 +828,7 @@ static void reducer_extend_window_to_best_header(
             ctl->ms->pindex_best_header, ctl->ms->pindex_best_header->nHeight);
 }
 
-static void reducer_publish_on_demand_tip(
+void reducer_publish_on_demand_tip(
         struct chain_activation_controller *ctl,
         const struct block_index *ingested,
         const struct uint256 *block_hash)

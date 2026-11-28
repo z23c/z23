@@ -690,8 +690,7 @@ int reducer_drain_to_convergence_unbudgeted(void)
 static void reducer_publish_fully_applied_at_tip_locked(
     struct chain_activation_controller *ctl)
 {
-    if (!ctl || !ctl->ms || !ctl->params ||
-        ctl->params->fMineBlocksOnDemand)
+    if (!ctl || !ctl->ms || !ctl->params)
         return;
 
     struct block_index *tip = active_chain_tip(&ctl->ms->chain_active);
@@ -723,6 +722,10 @@ static void reducer_publish_fully_applied_at_tip_locked(
     };
     if (!reducer_at_tip_authority_ready(&obs))
         return;
+    if (ctl->params->fMineBlocksOnDemand) {
+        reducer_publish_on_demand_tip(ctl, tip, tip->phashBlock);
+        return;
+    }
 
     LOG_INFO("reducer",
              "[reducer] publishing fully-applied at-tip authority h=%d "

@@ -111,8 +111,17 @@ void reducer_body_fsync_cadence_snapshot(uint64_t *deferred_total);
 void reducer_body_fsync_scope_snapshot(unsigned *depth,
                                        bool *event_log_deferred);
 
-#ifdef ZCL_TESTING
 struct chain_activation_controller;
+struct block_index;
+struct uint256;
+
+/* Caller holds the controller mutex. Publication requires successful,
+ * hash-bound script, proof and UTXO evidence for this on-demand tip. */
+void reducer_publish_on_demand_tip(struct chain_activation_controller *ctl,
+                                  const struct block_index *tip,
+                                  const struct uint256 *block_hash);
+
+#ifdef ZCL_TESTING
 /* Run the pre-drain anchor step of reducer_ingest_block on its own (the
  * runtime re-seed and the regtest genesis seed). A synthetic block cannot pass
  * reducer_ingest_block's Equihash check, so tests reach this step here. */
