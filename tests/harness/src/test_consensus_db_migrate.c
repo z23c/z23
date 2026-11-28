@@ -19,6 +19,7 @@
 #include "test/test_core.h"
 
 #include "storage/anchor_kv.h"
+#include "storage/ironwood_frontier_store.h"
 #include "storage/consensus_db.h"
 #include "storage/coins_kv.h"
 #include "storage/nullifier_kv.h"
@@ -145,6 +146,62 @@ static bool cdbt_build_source(const char *dir)
     return ok;
 }
 
+/* A real checkpoint store is an extra kernel table pair, not one of the
+ * seven schema-precreated fingerprint tables. Exercise the actual DDL-copy
+ * migration, preserving duplicate roots at distinct heights and counts. */
+static bool cdbt_seed_ironwood(sqlite3 *db)
+{
+    uint8_t genesis_parent[32] = {1}, h0[32] = {2}, h1[32] = {3}, h2[32] = {4};
+    uint8_t empty[32] = {9}, root[32] = {8}, one[41] = {1, 1}, two[41] = {1, 2};
+    one[9] = 1; two[9] = 2;
+    struct ironwood_checkpoint_session session = {0};
+    return cdbt_exec(db, "BEGIN") && ironwood_checkpoint_ensure_schema(db) &&
+        ironwood_checkpoint_begin_replay(db, genesis_parent, empty) &&
+        ironwood_checkpoint_refresh(db, &session) &&
+        ironwood_checkpoint_append(&session, 0, h0, genesis_parent, empty, 0, NULL, 0) &&
+        ironwood_checkpoint_append(&session, 1, h1, h0, root, 1, one, sizeof(one)) &&
+        ironwood_checkpoint_append(&session, 2, h2, h1, root, 2, two, sizeof(two)) &&
+        cdbt_exec(db, "COMMIT");
+}
+static bool cdbt_ironwood_indexes(sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT count(*) FROM sqlite_master WHERE type='index' AND tbl_name='ironwood_checkpoints' AND name IN ('ironwood_checkpoints_root','ironwood_checkpoints_payload')",
+            -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 2; // raw-sql-ok:test-fixture
+    sqlite3_finalize(s);
+    return ok;
+}
+
+static bool cdbt_check_ironwood(sqlite3 *db)
+{
+    uint8_t root[32] = {8};
+    struct ironwood_checkpoint_session session = {0};
+    struct ironwood_checkpoint row = {0};
+    return cdbt_exec(db, "BEGIN") && cdbt_ironwood_indexes(db) && ironwood_checkpoint_refresh(db, &session) &&
+        ironwood_checkpoint_find_root(&session, 2, root, &row) == IRONWOOD_CHECKPOINT_FOUND &&
+        row.height == 1 && row.count == 1 && row.payload_size == 41 && row.payload[9] == 1 &&
+        ironwood_checkpoint_find_root(&session, 3, root, &row) == IRONWOOD_CHECKPOINT_FOUND &&
+        row.height == 2 && row.count == 2 && row.payload_size == 41 && row.payload[9] == 2 &&
+        cdbt_exec(db, "COMMIT");
+}
+static bool cdbt_ironwood_migration(void)
+{
+    char dir[256], path[300], err[256]; sqlite3 *db = NULL;
+    test_make_tmpdir(dir, sizeof(dir), "consensus_db_migrate", "ironwood");
+    bool ok = cdbt_build_source(dir);
+    snprintf(path, sizeof(path), "%s/progress.kv", dir);
+    if (ok) ok = sqlite3_open(path, &db) == SQLITE_OK && cdbt_seed_ironwood(db);
+    if (db) { if (sqlite3_close(db) != SQLITE_OK) ok = false; db = NULL; }
+    if (ok) ok = consensus_db_migrate_from_progress(dir, err, sizeof(err));
+    snprintf(path, sizeof(path), "%s/consensus.db", dir);
+    if (ok) ok = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK && cdbt_check_ironwood(db);
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    test_cleanup_tmpdir(dir);
+    return ok;
+}
+
 /* Read the source kernel fingerprint by reopening <dir>/progress.kv. */
 static bool cdbt_source_stats(const char *dir,
                               struct consensus_db_kernel_stats *out)
@@ -166,6 +223,9 @@ int test_consensus_db_migrate(void)
 {
     int failures = 0;
     char err[256];
+
+    CK("Ironwood checkpoint rows and indexes survive migration",
+       cdbt_ironwood_migration());
 
     /* ── Fresh node: no progress.kv ──────────────────────────────── */
     char fresh[256];

@@ -6,6 +6,7 @@
  * progress-kv marker from DEFENSIVE_CODING.md; callers own transaction scope. */
 
 #include "storage/anchor_kv.h"
+#include "storage/ironwood_frontier_store.h"
 
 #include "core/serialize.h"
 #include "crypto/sha3.h"
@@ -672,6 +673,8 @@ bool anchor_kv_delete_range(sqlite3 *db, int64_t first_height,
                  (long long)first_height, (long long)last_height);
         return false;
     }
+    if (!ironwood_checkpoint_delete_range(db, first_height, last_height))
+        return false;
     sqlite3_stmt *s = NULL;
     for (int pool = ANCHOR_POOL_SPROUT; pool <= ANCHOR_POOL_SAPLING; pool++) {
         char sql[128];

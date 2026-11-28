@@ -20,7 +20,7 @@
 #include "lintc_proc.h"
 #include "lintc_sig.h"
 
-enum { CGS_CASES = 31, CGS_FILLER = 500 };
+enum { CGS_CASES = 35, CGS_FILLER = 500 };
 
 static const char k_fx0[] = "build/dev-obj/epochs/fx0";
 
@@ -805,13 +805,49 @@ static int cgs_case_y(const struct ccs_fx *fx)
     return f;
 }
 
+/* The verifier headless object has a different build path but is compiled
+ * from wallet_gui.c. Its uses must be attributed and it must not replace the
+ * primary object as evidence of coverage. */
+static int cgs_gui_alias_fixture(const struct ccs_fx *fx, const char *dir,
+                                 const char *rows, bool primary)
+{
+    char src[CCD_PATH], alias[CCD_PATH], main_obj[CCD_PATH];
+    snprintf(src, sizeof src, "%s/contexts/wallet/views/src/wallet_gui.c", dir);
+    snprintf(alias, sizeof alias, "%s/%s/tools/package_verify_wallet_gui.o", dir, k_fx0);
+    snprintf(main_obj, sizeof main_obj, "%s/%s/contexts/wallet/views/src/wallet_gui.o", dir, k_fx0);
+    if (cgs_base(fx, dir, rows) != 0 || ccs_put(fx, src, k_use) != 0 ||
+        cgs_cc(fx, src, alias, NULL) != 0) return -1;
+    return !primary || cgs_cc(fx, ".filler.c", main_obj, NULL) == 0 ? 0 : -1;
+}
+static int cgs_case_gui_alias(const struct ccs_fx *fx)
+{
+    struct ccg_cfg cfg; char row[CCD_PATH]; int f = 0;
+    const char *path = "contexts/wallet/views/src/wallet_gui.c";
+    cgs_cfg(&cfg);
+    if (cgs_gui_alias_fixture(fx, "gui_alias_ok", cgs_row(row, sizeof row, path, "CAP_NETWORK"), true) != 0 ||
+        cgs_gui_alias_fixture(fx, "gui_alias_missing", cgs_row(row, sizeof row, path, "CAP_NETWORK"), false) != 0 ||
+        cgs_gui_alias_fixture(fx, "gui_alias_undeclared", "", true) != 0 ||
+        cgs_base(fx, "gui_alias_orphan", "") != 0 ||
+        cgs_cc(fx, ".filler.c", "gui_alias_orphan/build/dev-obj/epochs/fx0/tools/package_verify_wallet_gui.o", NULL) != 0)
+        return ccs_say(0, "GUI alias: fixture");
+    const char *const positive[] = { "foreign-objects=0", "undeclared=0", NULL };
+    const char *const missing[] = { "UNPROVEN", "wallet_gui.c", NULL };
+    const char *const undeclared[] = { "undeclared reach", "contexts/wallet/views/src/wallet_gui.c", NULL };
+    f += cgs_check(fx, "gui_alias_ok", &cfg, 0, positive, "GUI alias: source attribution grades the auxiliary object");
+    f += cgs_check(fx, "gui_alias_missing", &cfg, 2, missing, "GUI alias: auxiliary object cannot prove primary coverage");
+    f += cgs_check(fx, "gui_alias_undeclared", &cfg, 1, undeclared, "GUI alias: undeclared auxiliary reach still fails");
+    const char *const orphan[] = { "foreign-objects=1", "tools/package_verify_wallet_gui.o", NULL };
+    return f + cgs_check(fx, "gui_alias_orphan", &cfg, 0, orphan, "GUI alias: absent actual source remains foreign");
+}
+
+
 static int cgs_cases(const struct ccs_fx *fx)
 {
     return cgs_case_a(fx) + cgs_case_b(fx) + cgs_case_c(fx) + cgs_case_d(fx) + cgs_case_e(fx) + cgs_case_f(fx) +
            cgs_case_g(fx) + cgs_case_h() + cgs_case_i(fx) + cgs_case_j(fx) + cgs_case_k(fx) + cgs_case_l() +
            cgs_case_m(fx) + cgs_case_n1(fx) + cgs_case_n2(fx) + cgs_case_o(fx) + cgs_case_p(fx) + cgs_case_q(fx) +
            cgs_case_r(fx) + cgs_case_s(fx) + cgs_case_t(fx) + cgs_case_u(fx) + cgs_case_v(fx) + cgs_case_w(fx) +
-           cgs_case_x(fx) + cgs_case_source_stat(fx) + cgs_case_spaced(fx) + cgs_case_y(fx);
+           cgs_case_x(fx) + cgs_case_gui_alias(fx) + cgs_case_source_stat(fx) + cgs_case_spaced(fx) + cgs_case_y(fx);
 }
 
 int check_capability_closure_selftest(void)

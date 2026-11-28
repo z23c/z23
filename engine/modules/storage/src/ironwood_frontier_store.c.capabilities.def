@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+ZCL_MODULE_CAPABILITY("engine/modules/storage/src/ironwood_frontier_store.c", CAP_FS_READ|CAP_FS_WRITE, "SQLite APIs support transactional checkpoint writes and audited reads.")

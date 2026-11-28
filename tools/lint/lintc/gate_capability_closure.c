@@ -131,10 +131,20 @@ static int ccg_is_file(const char *root, const char *rel)
            && S_ISREG(st.st_mode);
 }
 
+/* The package verifier builds this exact headless variant from wallet_gui.c.
+ * It is checked against that source, but does not prove the primary object
+ * was built. Keep this exact mapping aligned with the Makefile rule. */
+static bool ccg_is_package_gui_stub(const char *obj)
+{
+    return strcmp(obj, "tools/package_verify_wallet_gui.o") == 0;
+}
+
 /* "dir/x.o" becomes "dir/x.c"; any other name is kept. */
 static void ccg_c_of(const char *obj, char *out, size_t cap)
 {
-    if (zcl_str_has_suffix(obj, ".o"))
+    if (ccg_is_package_gui_stub(obj))
+        snprintf(out, cap, "%s", "contexts/wallet/views/src/wallet_gui.c");
+    else if (zcl_str_has_suffix(obj, ".o"))
         snprintf(out, cap, "%.*s.c", (int)(strlen(obj) - 2), obj);
     else
         snprintf(out, cap, "%s", obj);
@@ -277,7 +287,9 @@ static int ccg_grade_object(struct ccg_scan *s, const char *rel)
         return ccd_map_put(&s->foreign, rel, "");
     if (snprintf(abs, sizeof abs, "%s/%s", s->epoch, rel) >= (int)sizeof abs)
         return -1;
-    return ccd_map_put(&s->compiled, src, "") || ccg_list_add(&s->objs, abs) ? -1 : 0;
+    if (!ccg_is_package_gui_stub(rel) && ccd_map_put(&s->compiled, src, "") != 0)
+        return -1;
+    return ccg_list_add(&s->objs, abs) != 0 ? -1 : 0;
 }
 
 static void ccg_foreign_report(const struct ccg_scan *s)
