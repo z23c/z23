@@ -1,5 +1,5 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 /* purpose: Project public Ironwood action statements to Halo2 field rows. */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #ifndef ZCL_IRONWOOD_INSTANCE_H
 #define ZCL_IRONWOOD_INSTANCE_H
 #include <stdbool.h>

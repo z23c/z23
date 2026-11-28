@@ -1,3 +1,4 @@
+/* purpose: Share public Pasta point and field decoding within Ironwood services. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #ifndef ZCL_IRONWOOD_PASTA_INTERNAL_H
 #define ZCL_IRONWOOD_PASTA_INTERNAL_H
