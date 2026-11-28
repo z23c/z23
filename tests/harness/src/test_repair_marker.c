@@ -344,12 +344,17 @@ static int rm_check_bind_failure(sqlite3 *db, const uint8_t hash[32])
 {
     int failures = 0;
     const char *kind = "repair_marker_bind_failure_control";
-    bool have = false;
+    bool have = true;
     RM_CHECK("bind failure fixture", repair_marker_note(db, kind, 1, hash, NULL, 0));
     int old_limit = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 16);
+    sqlite3_stmt *probe = NULL;
+    int prepared = sqlite3_prepare_v2(db, "SELECT payload FROM repair_marker WHERE kind=? AND height=? AND hash=?", -1, &probe, NULL);
+    int bound = prepared == SQLITE_OK ? sqlite3_bind_text(probe, 1, kind, -1, SQLITE_TRANSIENT) : SQLITE_ERROR;
+    sqlite3_finalize(probe);
     bool ok = repair_marker_have(db, kind, 1, hash, &have, NULL, 0, NULL);
     sqlite3_limit(db, SQLITE_LIMIT_LENGTH, old_limit);
-    RM_CHECK("bind error never looks absent", !ok);
+    RM_CHECK("fixture reaches failing bind", prepared == SQLITE_OK && bound != SQLITE_OK);
+    RM_CHECK("bind error never looks absent", !ok && !have);
     RM_CHECK("marker survives bind error",
         repair_marker_have(db, kind, 1, hash, &have, NULL, 0, NULL) && have);
     return failures;
