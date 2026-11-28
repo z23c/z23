@@ -100,7 +100,7 @@ static bool check_binding_transaction(void)
     uint8_t wire[11518], cv[2][32], expected[32];
     FILE *f = fopen("tests/fixtures/ironwood/postnu63-two-action-payment.bin", "rb");
     if (!f) return false;
-    bool ok = fread(wire, 1, sizeof wire, f) == sizeof wire && fgetc(f) == EOF;
+    bool ok = fread(wire, 1, sizeof wire, f) == sizeof wire && fgetc(f) == EOF && !ferror(f);
     if (fclose(f) != 0 || !ok) return false;
     struct v6_wire_view v; struct v6_digests d; struct v6_action_view a;
     if (v6_wire_parse(wire, sizeof wire, &v) != V6_WIRE_OK || v.inputs != 0 ||
