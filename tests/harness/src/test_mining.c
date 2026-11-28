@@ -311,6 +311,23 @@ static bool mining_encode_address(const struct tx_destination *dest, char *out, 
     return encode_destination(dest, pk, pk_len, sc, sc_len, out, size);
 }
 
+static int mining_payout_refusals(struct rpc_table *table, const char *main_addr, bool main_ok)
+{
+    int failures = 0;
+    char request[320];
+    struct mining_failure_fixture f = {0};
+    rpc_mining_test_set_hooks(mining_count_template, NULL, &f);
+    snprintf(request, sizeof request, "[{\"payoutaddress\":\"%s\"}]", main_addr);
+    MT_CHECK("wrong-network payout refuses before work", main_ok &&
+             mining_slots_refused(table, request, "invalid address") && f.built == 0);
+    MT_CHECK("non-string payout refuses before work",
+             mining_slots_refused(table, "[{\"payoutaddress\":42}]", "must be a string") && f.built == 0);
+    MT_CHECK("malformed payout refuses before work",
+             mining_slots_refused(table, "[{\"payoutaddress\":\"bad\"}]", "invalid address") && f.built == 0);
+    rpc_mining_test_set_hooks(NULL, NULL, NULL);
+    return failures;
+}
+
 static int mining_payout_cases(struct rpc_table *table, const struct miner_signal_catalog_pin *pin)
 {
     int failures = 0;
@@ -322,16 +339,7 @@ static int mining_payout_cases(struct rpc_table *table, const struct miner_signa
     bool main_ok = mining_encode_address(&dest, main_addr, sizeof main_addr);
     chain_params_select(CHAIN_REGTEST);
     bool reg_ok = mining_encode_address(&dest, reg_addr, sizeof reg_addr);
-    struct mining_failure_fixture f = {0};
-    rpc_mining_test_set_hooks(mining_count_template, NULL, &f);
-    snprintf(request, sizeof request, "[{\"payoutaddress\":\"%s\"}]", main_addr);
-    MT_CHECK("wrong-network payout refuses before work", main_ok &&
-             mining_slots_refused(table, request, "invalid address") && f.built == 0);
-    MT_CHECK("non-string payout refuses before work",
-             mining_slots_refused(table, "[{\"payoutaddress\":42}]", "must be a string") && f.built == 0);
-    MT_CHECK("malformed payout refuses before work",
-             mining_slots_refused(table, "[{\"payoutaddress\":\"bad\"}]", "invalid address") && f.built == 0);
-    rpc_mining_test_set_hooks(NULL, NULL, NULL);
+    failures += mining_payout_refusals(table, main_addr, main_ok);
     struct json_value plain = {0}, voted = {0}; struct transaction a, b;
     snprintf(request, sizeof request, "[{\"payoutaddress\":\"%s\"}]", reg_addr);
     bool a_ok = reg_ok && mining_slots_call(table, request, &plain) && mining_coinbase_decode(&plain, &a);
