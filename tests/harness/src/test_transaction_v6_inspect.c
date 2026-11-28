@@ -840,11 +840,17 @@ static int check_v6_rpc_cases(void)
     return failures;
 }
 
-int test_transaction_v6_inspect(void)
+static int check_recipient_auth_cases(void)
 {
-    int failures = check_v6_rpc_cases();
+    int failures = 0;
     if (!check_recipient_fixture()) ++failures;
     if (!check_auth_views()) ++failures;
+    return failures;
+}
+
+int test_transaction_v6_inspect(void)
+{
+    int failures = check_v6_rpc_cases() + check_recipient_auth_cases();
     if (!check_action_views()) ++failures;
     if (!check_statement_views()) ++failures;
     if (!check_funded_instance()) ++failures;
