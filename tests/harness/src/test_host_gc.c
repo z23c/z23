@@ -708,16 +708,21 @@ static bool hgt_shell_floor_run(const char *root, const char *repo, const char *
 {
     char home_env[HGT_PATH + 32], repo_env[HGT_PATH + 32], pool_env[HGT_PATH + 32];
     char proc_env[HGT_PATH + 32], ram_env[HGT_PATH + 32], state_env[HGT_PATH + 32];
-    char path_env[HGT_PATH + 64], out[65536];
+    char path_env[HGT_PATH + 64], private_home[HGT_PATH + 16], temp_env[HGT_PATH + 32];
+    char out[65536];
     if (snprintf(home_env, sizeof home_env, "ZCL_HOST_GC_HOME=%s", root) >= (int)sizeof home_env ||
         snprintf(repo_env, sizeof repo_env, "ZCL_HOST_GC_REPO=%s", repo) >= (int)sizeof repo_env ||
         snprintf(pool_env, sizeof pool_env, "ZCL_HOST_GC_Z23P=%s", pool) >= (int)sizeof pool_env ||
         snprintf(proc_env, sizeof proc_env, "ZCL_HOST_GC_PROC=%s", proc) >= (int)sizeof proc_env ||
         snprintf(ram_env, sizeof ram_env, "ZCL_HOST_GC_RAM_ROOT=%s/no-ram", root) >= (int)sizeof ram_env ||
         snprintf(state_env, sizeof state_env, "ZCL_HOST_GC_STATE=%s/state", root) >= (int)sizeof state_env ||
+        snprintf(private_home, sizeof private_home, "HOME=%s", root) >= (int)sizeof private_home ||
+        snprintf(temp_env, sizeof temp_env, "ZCL_HOST_GC_TMP=%s", root) >= (int)sizeof temp_env ||
         snprintf(path_env, sizeof path_env, "PATH=%s:/usr/bin:/bin", bin) >= (int)sizeof path_env) return false;
-    const char *argv[] = {"env", home_env, repo_env, pool_env, proc_env, ram_env, state_env, path_env,
-        "ZCL_HOST_GC_Z23_BIN=/nonexistent/z23", "ZCL_HOST_GC_Z23P_MIN_AGE_H=1",
+    const char *argv[] = {"env", "-i", private_home, home_env, repo_env, pool_env, proc_env,
+        ram_env, state_env, temp_env, path_env, "LC_ALL=C",
+        "ZCL_HOST_GC_Z23_BIN=/nonexistent/z23", "ZCL_HOST_GC_WORKTREE_GC=/nonexistent/worktree-gc",
+        "ZCL_HOST_GC_Z23P_MIN_AGE_H=1",
         "tools/scripts/host_gc.sh", "--only", "z23p", "--apply", NULL};
     int rc = zcl_spawn_capture(argv, out, sizeof out, 180000);
     if (rc != 0) fprintf(stderr, "host gc floor fixture rc=%d: %s\n", rc, out);
