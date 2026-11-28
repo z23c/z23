@@ -428,7 +428,7 @@ static bool nf_v6_header_valid(const struct v6_wire_view *view)
 
 static bool nf_v6_bundles_supported(const struct v6_wire_view *view)
 {
-    return !view->sapling_spends.count && !view->orchard.count;
+    return !view->orchard.count;
 }
 
 static bool nf_v6_view(const struct transaction *tx,
@@ -457,9 +457,7 @@ static bool nf_v6_view(const struct transaction *tx,
     }
     if (!nf_v6_bundles_supported(view)) {
         LOG_WARN(NF_SUBSYS,
-                 "[utxo_apply] unsupported v6 bundle rejected: sapling_spends=%llu "
-                 "orchard_actions=%llu",
-                 (unsigned long long)view->sapling_spends.count,
+                 "[utxo_apply] unsupported v6 Orchard bundle rejected: actions=%llu",
                  (unsigned long long)view->orchard.count);
         memset(view, 0, sizeof(*view));
         return false;

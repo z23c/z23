@@ -791,9 +791,9 @@ static bool uv_add_malformed_ironwood(struct transaction *tx)
     return transaction_v6_store_wire(tx, wire, sizeof wire, sizeof wire);
 }
 
-/* Add two structurally parseable 96-byte v6 Sapling spends with the same
- * nullifier alongside one Ironwood action. Proof bytes remain zero: this is a
- * reducer refusal fixture, not a validity-bearing transaction. */
+/* Add one v6 Sapling spend alongside one Ironwood action. Proof bytes remain
+ * zero: this exercises nullifier accounting below proof validation, not
+ * transaction admission. */
 enum { UV_V6_SPEND = 96, UV_V6_PROOF = 192, UV_V6_SIGNATURE = 64 };
 
 static bool uv_mixed_v6_original_view(struct v6_wire_view *original)
@@ -813,22 +813,26 @@ static uint8_t *uv_build_mixed_v6_wire(const struct v6_wire_view *original,
     const uint8_t *base = ironwood_anchor_a;
     size_t spends = (size_t)(original->sapling_spends.wire.data - base);
     size_t tail = (size_t)(original->sapling_tail.data - base);
-    size_t tail_size = 8 + 32 + 2 * UV_V6_PROOF + 2 * UV_V6_SIGNATURE +
+    size_t tail_size = 8 + 32 + UV_V6_PROOF + UV_V6_SIGNATURE +
         UV_V6_SIGNATURE;
     if (!spends || base[spends - 1] != 0 || tail < spends ||
         tail > sizeof ironwood_anchor_a ||
-        tail_size > SIZE_MAX - sizeof ironwood_anchor_a - 2 * UV_V6_SPEND)
+        tail_size > SIZE_MAX - sizeof ironwood_anchor_a - UV_V6_SPEND)
         return NULL;
-    size_t size = sizeof ironwood_anchor_a + 2 * UV_V6_SPEND + tail_size;
+    size_t size = sizeof ironwood_anchor_a + UV_V6_SPEND + tail_size;
     uint8_t *wire = zcl_calloc(size, 1, "uv_v6_mixed");
     if (!wire)
         return NULL;
     memcpy(wire, base, spends);
-    wire[spends - 1] = 2;
-    for (size_t i = 0; i < 2; i++)
-        uv_nf_bytes(wire + spends + i * UV_V6_SPEND + 32, sapling_tag, mark);
-    memcpy(wire + spends + 2 * UV_V6_SPEND, base + spends, tail - spends);
-    size_t new_tail = tail + 2 * UV_V6_SPEND;
+    wire[spends - 1] = 1;
+    struct incremental_merkle_tree empty;
+    struct uint256 empty_root;
+    sapling_tree_init(&empty);
+    incremental_tree_root(&empty, &empty_root);
+    uv_nf_bytes(wire + spends + 32, sapling_tag, mark);
+    memcpy(wire + spends + UV_V6_SPEND, base + spends, tail - spends);
+    size_t new_tail = tail + UV_V6_SPEND;
+    memcpy(wire + new_tail + 8, empty_root.data, 32);
     memcpy(wire + new_tail + tail_size, base + tail,
            sizeof ironwood_anchor_a - tail);
     *size_out = size;
@@ -839,14 +843,13 @@ static bool uv_mixed_v6_wire_valid(const uint8_t *wire, size_t size,
                                    struct v6_wire_view *check)
 {
     return v6_core_parse(wire, size, check) == V6_WIRE_OK &&
-        check->sapling_spends.count == 2 &&
-        check->sapling_spends.wire.size == 2 * UV_V6_SPEND &&
+        check->sapling_spends.count == 1 &&
+        check->sapling_spends.wire.size == UV_V6_SPEND &&
         !check->orchard.count && check->ironwood.count == 1 &&
-        memcmp(check->sapling_spends.wire.data + 32,
-               check->sapling_spends.wire.data + UV_V6_SPEND + 32, 32) == 0;
+        check->sapling_spends.wire.data;
 }
 
-static bool uv_add_mixed_v6_repeated_sapling(struct transaction *tx,
+static bool uv_add_mixed_v6_sapling(struct transaction *tx,
                                              uint8_t sapling_tag,
                                              uint8_t ironwood_tag,
                                              uint8_t mark)
@@ -864,10 +867,10 @@ static bool uv_add_mixed_v6_repeated_sapling(struct transaction *tx,
     ok = ok && v6_core_bundle_action(&check.ironwood, 0, &action);
     if (ok) {
         uv_nf_bytes((uint8_t *)action.nullifier.data, ironwood_tag, mark);
-        tx->overwintered = true;
-        tx->version = IRONWOOD_TX_VERSION;
-        tx->version_group_id = IRONWOOD_VERSION_GROUP_ID;
-        ok = transaction_v6_store_wire(tx, wire, size, size);
+        struct byte_stream stream;
+        stream_init_from_data(&stream, wire, size);
+        ok = transaction_v6_decode_prefix(tx, &stream, size) &&
+            !stream_remaining(&stream);
     }
     free(wire);
     return ok;
@@ -2652,37 +2655,40 @@ static int uv_nf_ironwood_mixed_v6_cases(void)
     int failures = 0;
     char dir[256]; struct main_state ms; struct synth_chain_uv sc;
     blocker_clear("utxo_apply.apply_failed");
-    blocker_clear("utxo_apply.fatal_store");
     UV_CHECK("nf ironwood mixed v6: setup",
              uv_setup("nf_iw_mixed_v6", 3, UV_FAIL_NONE, -1, dir, sizeof(dir),
                       &ms, &sc) == 0);
     const uint8_t prior[1] = { 0x21 };
-    UV_CHECK("nf ironwood mixed v6: prior Ironwood action attaches",
+    UV_CHECK("nf ironwood mixed v6: mixed Sapling and Ironwood tx attaches",
              uv_append_bare_tx(&sc.bodies[1], 1) &&
-             uv_add_ironwood_actions(&sc.bodies[1].vtx[2], prior, 1, 0x91));
-    UV_CHECK("nf ironwood mixed v6: repeated Sapling spends attach",
-             uv_append_bare_tx(&sc.bodies[2], 2) &&
-             uv_add_mixed_v6_repeated_sapling(&sc.bodies[2].vtx[2],
-                                               0x22, 0x23, 0x91));
-    UV_CHECK("nf ironwood mixed v6: prior height applies",
+             uv_add_mixed_v6_sapling(&sc.bodies[1].vtx[2],
+                                      prior[0], 0x21, 0x91));
+    UV_CHECK("nf ironwood mixed v6: duplicate Sapling spend attaches",
+             uv_append_bare_tx(&sc.bodies[2], 1) &&
+             uv_add_mixed_v6_sapling(&sc.bodies[2].vtx[2],
+                                      prior[0], 0x23, 0x91));
+    UV_CHECK("nf ironwood mixed v6: mixed migration block applies",
              utxo_apply_stage_drain(100) == 2);
-    UV_CHECK("nf ironwood mixed v6: mixed block rejected",
-             utxo_apply_stage_step_once() == JOB_FATAL);
+    UV_CHECK("nf ironwood mixed v6: duplicate drain stops at h2",
+             utxo_apply_stage_drain(100) == 0);
+    UV_CHECK("nf ironwood mixed v6: duplicate blocker",
+             uv_blocker_reason_has("status=shielded_double_spend"));
     UV_CHECK("nf ironwood mixed v6: cursor held at h=2",
              utxo_apply_stage_cursor() == 2);
-    UV_CHECK("nf ironwood mixed v6: prior Ironwood row retained",
-             uv_nf_rows_at(progress_store_db(), 1) == 1);
+    UV_CHECK("nf ironwood mixed v6: both migration nullifiers retained",
+             uv_nf_rows_at(progress_store_db(), 1) == 2);
     UV_CHECK("nf ironwood mixed v6: zero new nullifier rows",
              uv_nf_rows_at(progress_store_db(), 2) == 0);
     uint8_t fresh[32]; bool found = true;
+    uv_nf_bytes(fresh, prior[0], 0x91);
+    UV_CHECK("nf ironwood mixed v6: Sapling nullifier retained",
+             nullifier_kv_get(progress_store_db(), fresh,
+                              NULLIFIER_POOL_SAPLING, &found, NULL) && found);
     uv_nf_bytes(fresh, 0x23, 0x91);
     UV_CHECK("nf ironwood mixed v6: new Ironwood action absent",
              nullifier_kv_get(progress_store_db(), fresh,
                               NULLIFIER_POOL_IRONWOOD, &found, NULL) && !found);
-    UV_CHECK("nf ironwood mixed v6: fatal refusal named",
-             blocker_exists("utxo_apply.fatal_store"));
     blocker_clear("utxo_apply.apply_failed");
-    blocker_clear("utxo_apply.fatal_store");
     uv_teardown(dir, &ms, &sc);
     return failures;
 }
