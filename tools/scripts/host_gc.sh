@@ -1323,7 +1323,7 @@ sweep_tmplitter() {
         [ -e "$entry" ] || continue
         name="$(basename -- "$entry")"
         case "$name" in
-            zcl-pristine-*|claude-*|systemd-*|.X*|snap-*) continue ;;
+            zcl-pristine-*|claude-*|codex-daemon-*|cc-daemon-*|systemd-*|.X*|snap-*) continue ;;
         esac
         is_protected "$entry" && continue
         case "$(printf '%s\n' "$registered")" in
@@ -2119,7 +2119,9 @@ sweep_scratch
 sweep_ramscratch
 sweep_wtbuild
 sweep_landtmp
-sweep_landed
+if [ "$ONLY" = landed ] || [ "$REAP_LANDED" = 1 ] || [ "${ZCL_HOST_GC_LANDED_REPORT:-1}" != 0 ]; then
+    sweep_landed
+fi
 sweep_quarantine_expiry
 sweep_zcc
 

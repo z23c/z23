@@ -155,6 +155,8 @@ git -C "$REPO_FX" commit -q -m base
 # given MODE (dry-run|apply) against the fixture tree, capturing output.
 run_hostgc() {
     local cat="$1" mode="$2"; shift 2
+    local -a selection=()
+    if [ -n "$cat" ]; then selection=(--only "$cat"); fi
     env \
         ZCL_HOST_GC_HOME="$HOME_FX" \
         ZCL_HOST_GC_TMP="$TMP_FX" \
@@ -182,7 +184,7 @@ run_hostgc() {
         ZCL_HOST_GC_SYSTEMCTL_BIN="${ZCL_HOST_GC_SYSTEMCTL_BIN:-$SYSTEMCTL_STUB}" \
         PATH="$DF_STUB_DIR:$PATH" \
         "$@" \
-        "$HOSTGC" --only "$cat" "--$mode" ${HGT_EXTRA_ARGS:-}
+        "$HOSTGC" "${selection[@]}" "--$mode" ${HGT_EXTRA_ARGS:-}
 }
 
 assert_contains() {
@@ -213,16 +215,23 @@ mkdir -p -- "$TMP_FX/orphan-fixture"
 touch_old "$TMP_FX/orphan-fixture"
 mkdir -p -- "$TMP_FX/claude-keepme"   # matches the standing exemption prefix
 touch_old "$TMP_FX/claude-keepme"
+mkdir -p -- "$TMP_FX/codex-daemon-keepme" "$TMP_FX/cc-daemon-keepme"
+touch_old "$TMP_FX/codex-daemon-keepme"
+touch_old "$TMP_FX/cc-daemon-keepme"
 
 out="$(run_hostgc tmplitter dry-run)"
 log="$(cat -- "$STATE_FX/host_gc.log" 2>/dev/null || true)"
 assert_contains "$log" "orphan-fixture" "tmplitter dry-run logs the unregistered entry as reapable"
 assert_not_contains "$log" "claude-keepme" "tmplitter dry-run never logs an exempt entry"
+assert_not_contains "$log" "codex-daemon-keepme" "tmplitter dry-run preserves codex daemon files"
+assert_not_contains "$log" "cc-daemon-keepme" "tmplitter dry-run preserves cc daemon files"
 assert_contains "$out" "1 reapable" "tmplitter dry-run summary counts the reapable entry"
 
 out="$(run_hostgc tmplitter apply)"
 assert_gone "$TMP_FX/orphan-fixture" "tmplitter apply left the unregistered entry behind" "tmplitter apply removed the unregistered entry"
 [ -e "$TMP_FX/claude-keepme" ] || fail "tmplitter apply removed an exempt entry"
+[ -e "$TMP_FX/codex-daemon-keepme" ] || fail "tmplitter apply removed codex daemon files"
+[ -e "$TMP_FX/cc-daemon-keepme" ] || fail "tmplitter apply removed cc daemon files"
 
 # -------------------------------------------------------------------- z23p
 # z23p only ever looks at entries `git worktree list` reports for GC_REPO,
@@ -813,6 +822,13 @@ make_landed_wt lane-dirty 1
 echo wip > "$WT_FX/lane-dirty/wip.txt"
 touch_tree_old "$WT_FX/lane-dirty"
 landed_sha="$(git -C "$WT_FX/lane-landed" rev-parse HEAD)"
+
+out="$(run_hostgc "" dry-run ZCL_HOST_GC_LANDED_REPORT=0)"
+assert_not_contains "$out" "fully landed idle worktrees" "full sweep honors landed report opt-out"
+out="$(run_hostgc landed dry-run ZCL_HOST_GC_LANDED_REPORT=0)"
+assert_contains "$out" "fully landed idle worktrees" "explicit landed still runs with report disabled"
+out="$(HGT_EXTRA_ARGS=--reap-landed-worktrees run_hostgc "" dry-run ZCL_HOST_GC_LANDED_REPORT=0)"
+assert_contains "$out" "fully landed idle worktrees" "explicit reap still runs with report disabled"
 
 out="$(run_hostgc landed apply)"
 assert_contains "$out" "opt-in" "landed without --reap-landed-worktrees says it is opt-in"
