@@ -4,6 +4,7 @@
 #include "services/ironwood_postnu63.h"
 #include "services/ironwood_postnu63_domain.h"
 #include "ironwood_pasta_internal.h"
+#include "base/serialize_le.h"
 #include <openssl/bn.h>
 #include <string.h>
 
@@ -65,7 +66,7 @@ static struct zcl_result gate_special(struct gate_machine *m, const uint8_t *pro
                                       size_t size, size_t *position)
 {
     if (!m->special || size - *position < 2) return ZCL_ERR(-1, "Invalid special gate query");
-    unsigned index = program[*position] | ((unsigned)program[*position + 1] << 8);
+    unsigned index = zcl_read_u16_le(program + *position);
     *position += 2;
     int slot = gate_special_index(m->special_kind, index);
     return slot < 0 ? ZCL_ERR(-1, "Unknown special gate query") : gate_push(m, m->special + (size_t)slot * 32);
