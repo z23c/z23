@@ -6,6 +6,7 @@
 
 #include "primitives/block.h"
 #include "primitives/transaction.h"
+#include "primitives/transaction_v6_decode.h"
 #include "core/hash.h"
 #include "core/serialize.h"
 #include "util/log_macros.h"
@@ -110,10 +111,19 @@ bool block_deserialize(struct block *b, struct byte_stream *s)
     b->vtx = zcl_calloc(b->num_vtx, sizeof(struct transaction), "block_vtx");
     if (!b->vtx && b->num_vtx > 0)
         LOG_FAIL("block", "alloc failed for %zu tx slots", b->num_vtx);
+    bool has_v6 = false;
     for (size_t i = 0; i < b->num_vtx; i++) {
         transaction_init(&b->vtx[i]);
-        if (!transaction_deserialize(&b->vtx[i], s)) return false;
+        if (transaction_v6_decode_is_prefix(s)) {
+            has_v6 = true;
+            if (!transaction_v6_decode_prefix(&b->vtx[i], s, MAX_BLOCK_SIZE))
+                return false;
+        } else if (!transaction_deserialize(&b->vtx[i], s)) {
+            return false;
+        }
     }
+    if (has_v6 && stream_remaining(s) != 0)
+        LOG_FAIL("block", "v6 block has %zu trailing bytes", stream_remaining(s));
     return true;
 }
 

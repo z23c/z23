@@ -1338,3 +1338,7 @@ later lane flips it HARD.
 - 2026-11-27T20:01:43Z — REASON: Owner-authorized research v6 parser fail-closed output initialization
   old ROOT: e528ad038594dfe2b56f1458c6d54c9741a6172eb86683c34120d1d1b05ee92a
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-28T01:44:54Z — REASON: testnet-only Ironwood v6 block decode integration
+  old ROOT: f574dc6da60a9a69b538d71ec9dda4536140bc357c31a6927de7f395dc32cc56
+  by: owner unseal ritual (make core-unseal)

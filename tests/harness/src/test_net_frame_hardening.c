@@ -32,7 +32,9 @@
 
 #include "test/test_core.h"
 
+#include "base/hex.h"
 #include "core/serialize.h"
+#include "crypto/sha256.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "net/p2p_message.h"
@@ -40,8 +42,10 @@
 #include "net/compact_blocks.h"
 #include "net/zmsg.h"
 #include "net/file_market.h"
+#include "transaction_v6_ironwood_fixture.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define NETH_CHECK(name, expr) do { \
@@ -382,6 +386,246 @@ static int neth_case_block(void)
     stream_free(&r);
     stream_free(&w);
 
+    return failures;
+}
+
+static void neth_v6_block_start(struct byte_stream *w, uint64_t count)
+{
+    unsigned char zeros[BLOCK_HEADER_SIZE] = {0};
+    stream_init(w, 256);
+    stream_write_bytes(w, zeros, sizeof(zeros));
+    stream_write_compact_size(w, 0);
+    stream_write_compact_size(w, count);
+}
+
+static int neth_case_block_v6(void)
+{
+    int failures = 0;
+    struct byte_stream w;
+    struct byte_stream r;
+    struct block b;
+
+    neth_v6_block_start(&w, 2);
+    stream_write_bytes(&w, ironwood_anchor_a, sizeof(ironwood_anchor_a));
+    stream_write_bytes(&w, ironwood_anchor_a, sizeof(ironwood_anchor_a));
+    neth_reader(&r, &w, w.size);
+    block_init(&b);
+    NETH_CHECK("block v6: consecutive checked frames deserialize",
+               block_deserialize(&b, &r) && r.read_pos == r.size);
+    NETH_CHECK("block v6: opaque bytes retained and txids left null",
+               b.num_vtx == 2 &&
+               b.vtx[0].v6_wire.size == sizeof(ironwood_anchor_a) &&
+               b.vtx[1].v6_wire.size == sizeof(ironwood_anchor_a) &&
+               memcmp(b.vtx[0].v6_wire.data, ironwood_anchor_a,
+                      sizeof(ironwood_anchor_a)) == 0 &&
+               memcmp(b.vtx[1].v6_wire.data, ironwood_anchor_a,
+                      sizeof(ironwood_anchor_a)) == 0 &&
+               b.vtx[0].v6_wire.data != b.vtx[1].v6_wire.data &&
+               b.vtx[0].overwintered && b.vtx[0].version == IRONWOOD_TX_VERSION &&
+               b.vtx[0].version_group_id == IRONWOOD_VERSION_GROUP_ID &&
+               uint256_is_null(&b.vtx[0].hash) && uint256_is_null(&b.vtx[1].hash));
+    block_free(&b);
+    stream_free(&r);
+
+    stream_write_u8(&w, 0);
+    neth_reader(&r, &w, w.size);
+    block_init(&b);
+    NETH_CHECK("block v6: trailing bytes refused",
+               block_deserialize(&b, &r) == false);
+    block_free(&b);
+    stream_free(&r);
+    stream_free(&w);
+
+    neth_v6_block_start(&w, 1);
+    stream_write_bytes(&w, ironwood_anchor_a, sizeof(ironwood_anchor_a) - 1);
+    neth_reader(&r, &w, w.size);
+    block_init(&b);
+    NETH_CHECK("block v6: truncated frame refused",
+               block_deserialize(&b, &r) == false && b.vtx[0].v6_wire.data == NULL);
+    block_free(&b);
+    stream_free(&r);
+    stream_free(&w);
+
+    neth_v6_block_start(&w, 1);
+    stream_write_bytes(&w, ironwood_anchor_a, 20);
+    stream_write_u8(&w, 253);
+    stream_write_u16_le(&w, 0);
+    stream_write_bytes(&w, ironwood_anchor_a + 20,
+                       sizeof(ironwood_anchor_a) - 20);
+    neth_reader(&r, &w, w.size);
+    block_init(&b);
+    NETH_CHECK("block v6: non-canonical count refused",
+               block_deserialize(&b, &r) == false && b.vtx[0].v6_wire.data == NULL);
+    block_free(&b);
+    stream_free(&r);
+    stream_free(&w);
+
+    for (int32_t version = OVERWINTER_TX_VERSION;
+         version <= SAPLING_TX_VERSION; ++version) {
+        struct transaction legacy;
+        transaction_init(&legacy);
+        legacy.overwintered = true;
+        legacy.version = version;
+        legacy.version_group_id = version == OVERWINTER_TX_VERSION ?
+                                  OVERWINTER_VERSION_GROUP_ID : SAPLING_VERSION_GROUP_ID;
+        struct byte_stream txwire;
+        stream_init(&txwire, 128);
+        NETH_CHECK("block legacy: control serializes",
+                   transaction_serialize(&legacy, &txwire));
+        transaction_free(&legacy);
+
+        neth_v6_block_start(&w, 1);
+        stream_write_bytes(&w, txwire.data, txwire.size);
+        stream_write_u8(&w, 0);
+        neth_reader(&r, &w, w.size);
+        block_init(&b);
+        char label[96];
+        snprintf(label, sizeof(label),
+                 "block v%d: legacy decode and trailing behavior unchanged", version);
+        NETH_CHECK(label,
+                   block_deserialize(&b, &r) && b.num_vtx == 1 &&
+                   b.vtx[0].version == version && stream_remaining(&r) == 1 &&
+                   r.read_pos == w.size - 1);
+        struct byte_stream encoded;
+        stream_init(&encoded, 128);
+        NETH_CHECK("block legacy: reserialized bytes unchanged",
+                   transaction_serialize(&b.vtx[0], &encoded) &&
+                   encoded.size == txwire.size &&
+                   memcmp(encoded.data, txwire.data, txwire.size) == 0);
+        stream_free(&encoded);
+        block_free(&b);
+        stream_free(&r);
+        stream_free(&txwire);
+        stream_free(&w);
+    }
+
+    return failures;
+}
+
+static bool neth_digest_is(const unsigned char digest[32], const char *expected)
+{
+    char hex[65];
+    zcl_hex_encode(digest, 32, hex);
+    return strcmp(hex, expected) == 0;
+}
+
+static bool neth_sha256_is(const unsigned char *data, size_t size,
+                           const char *expected)
+{
+    struct sha256_ctx sha;
+    unsigned char digest[32];
+    sha256_init(&sha);
+    sha256_write(&sha, data, size);
+    sha256_finalize(&sha, digest);
+    return neth_digest_is(digest, expected);
+}
+
+static int neth_case_external_v6_block(void)
+{
+    int failures = 0;
+    const char *required_env = getenv("Z23_V6_BLOCK_REQUIRED");
+    bool required = required_env && strcmp(required_env, "1") == 0;
+    if (required_env && !required && strcmp(required_env, "0") != 0)
+        NETH_CHECK("block v6: required mode is 0 or 1", false);
+
+    const char *path = getenv("Z23_V6_BLOCK_CANDIDATE");
+    if (!path || !*path) {
+        if (required)
+            NETH_CHECK("block v6: required candidate path is present", false);
+        return failures;
+    }
+
+    FILE *file = fopen(path, "rb");
+    NETH_CHECK("block v6: external candidate opens", file != NULL);
+    if (!file) return failures;
+    long length = -1;
+    bool sized = fseek(file, 0, SEEK_END) == 0 &&
+                 (length = ftell(file)) > 0 && length <= MAX_BLOCK_SIZE &&
+                 fseek(file, 0, SEEK_SET) == 0;
+    NETH_CHECK("block v6: external candidate has bounded size", sized);
+    if (!sized) {
+        fclose(file);
+        return failures;
+    }
+
+    size_t size = (size_t)length;
+    unsigned char *data = malloc(size);
+    NETH_CHECK("block v6: external candidate buffer allocates", data != NULL);
+    if (!data) {
+        fclose(file);
+        return failures;
+    }
+    bool read = fread(data, 1, size, file) == size;
+    if (fclose(file) != 0) read = false;
+    NETH_CHECK("block v6: external candidate reads completely", read);
+    if (!read) {
+        free(data);
+        return failures;
+    }
+
+    NETH_CHECK("block v6: strict H127 candidate is exactly 9882 bytes",
+               size == 9882);
+    bool block_identity = size == 9882 && neth_sha256_is(data, size,
+        "c55c4ccad3b636da48c32c7cc3ac13e96bd3e151e82af16a940ed99d0f2b0d55");
+    NETH_CHECK("block v6: strict H127 whole-block SHA-256 identity",
+               block_identity);
+    if (!block_identity) {
+        free(data);
+        return failures;
+    }
+
+    struct byte_stream r;
+    stream_init_from_data(&r, data, size);
+    struct block b;
+    block_init(&b);
+    bool decoded = block_deserialize(&b, &r);
+    bool shape = decoded && r.read_pos == r.size && b.num_vtx == 2 &&
+                 b.vtx[1].v6_wire.size != 0;
+    NETH_CHECK("block v6: external strict funded candidate decodes exactly",
+               shape);
+    if (!shape) {
+        block_free(&b);
+        stream_free(&r);
+        free(data);
+        return failures;
+    }
+
+    struct uint256 parent, merkle, sapling, block_id;
+    uint256_set_hex(&parent,
+        "0538be8be2416c63df63c6319726d805db66e3189df6f8bdbbc4c04caf5cd473");
+    uint256_set_hex(&merkle,
+        "a685e1643c76ab4ee8d8f50a0cf250a72fc9db77da585a5e7ddff11d4a27ce80");
+    uint256_set_hex(&sapling,
+        "6eb10fd1464824132d26de60046cbed6bc1676527cf3965451d1d9f8e278e699");
+    block_get_hash(&b, &block_id);
+    NETH_CHECK("block v6: independent H127 header identity",
+               b.header.nSolutionSize == 36 && b.header.nBits == 0x200f0f0f &&
+               uint256_eq(&b.header.hashPrevBlock, &parent) &&
+               uint256_eq(&b.header.hashMerkleRoot, &merkle) &&
+               uint256_eq(&b.header.hashFinalSaplingRoot, &sapling) &&
+               neth_digest_is(block_id.data,
+                   "5c60569e89416a317adf01fb9f1bc90954a2fd25cdfe61975eebe57304ea9d04"));
+
+    struct byte_stream coinbase;
+    stream_init(&coinbase, 128);
+    bool coinbase_encoded = transaction_serialize(&b.vtx[0], &coinbase);
+    NETH_CHECK("block v6: independent H127 transaction identities and bytes",
+               b.vtx[0].version == SAPLING_TX_VERSION &&
+               transaction_is_coinbase(&b.vtx[0]) && coinbase_encoded &&
+               coinbase.size == 82 && memcmp(coinbase.data, data + 178, 82) == 0 &&
+               neth_digest_is(b.vtx[0].hash.data,
+                   "e8fe2b19757b591262f16b445638b26047072db3395e60a02b0656f63c15c7f7") &&
+               b.vtx[1].v6_wire.size == 9622 &&
+               b.vtx[1].v6_wire.data != data + 260 &&
+               memcmp(b.vtx[1].v6_wire.data, data + 260, 9622) == 0 &&
+               neth_sha256_is(b.vtx[1].v6_wire.data, b.vtx[1].v6_wire.size,
+                   "684900bd4595fa07474506a5b6d04b524ff2954877b259a6de6c7da5f4ee2111") &&
+               uint256_is_null(&b.vtx[1].hash));
+
+    stream_free(&coinbase);
+    block_free(&b);
+    stream_free(&r);
+    free(data);
     return failures;
 }
 
@@ -844,6 +1088,8 @@ int test_net_frame_hardening(void)
     failures += neth_case_block_locator();
     failures += neth_case_block_header();
     failures += neth_case_block();
+    failures += neth_case_block_v6();
+    failures += neth_case_external_v6_block();
     failures += neth_case_transaction();
     failures += neth_case_compact_block();
     failures += neth_case_block_txn_request();

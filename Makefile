@@ -12784,8 +12784,10 @@ bench-simd: $(BIN_DIR)/simd_bench
 #   for h in ...; do zclassic-cli getblock $$(zclassic-cli getblockhash $$h) 0; done
 # With no CORPUS it falls back to a synthetic block and labels it as such.
 SERIAL_BENCH_SRCS = tools/serial_bench.c \
-	core/modules/primitives/src/transaction.c core/modules/primitives/src/block.c \
-	core/modules/bloom/src/merkle.c \
+	core/modules/primitives/src/transaction.c \
+	core/modules/primitives/src/transaction_v6_decode.c \
+	core/modules/primitives/src/transaction_v6_wire.c \
+	core/modules/primitives/src/block.c core/modules/bloom/src/merkle.c \
 	core/math/src/serialize.c core/math/src/uint256.c core/math/src/hash.c \
 	core/modules/crypto/src/sha256.c core/modules/crypto/src/sha512.c core/modules/crypto/src/ripemd160.c \
 	core/modules/crypto/src/hmac_sha512.c platform/modules/encoding/src/utilstrencodings.c \
