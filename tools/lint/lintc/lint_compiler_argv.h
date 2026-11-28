@@ -1,5 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
-/* purpose: Parse bounded compiler argument lists for native lint gates. */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * purpose: Parse bounded compiler argument lists for native lint gates. */
 #ifndef Z23_LINT_COMPILER_ARGV_H
 #define Z23_LINT_COMPILER_ARGV_H
 
