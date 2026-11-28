@@ -151,6 +151,48 @@ static bool cold_replay(struct session_fixture *f)
         f->reads[0] == 1 && f->reads[1] == 1 && f->reads[2] == 1 &&
         utxo_ironwood_session_publish(&p) && sql(f->db, "ROLLBACK");
 }
+static bool table_exists(sqlite3 *db, const char *name)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", -1, &s, NULL) != SQLITE_OK) return false;
+    bool found = sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW; // raw-sql-ok:test-fixture
+    sqlite3_finalize(s);
+    return found;
+}
+static bool partial_empty_refused(struct session_fixture *f)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return false;
+    bool ok = sql(db, "BEGIN; CREATE TABLE ironwood_checkpoint_state(id INTEGER PRIMARY KEY,tip INTEGER,generation INTEGER)");
+    struct utxo_ironwood_pending p, before;
+    memset(&p, 0xa5, sizeof p); memcpy(&before, &p, sizeof p);
+    utxo_ironwood_session_reset();
+    if (ok) ok = utxo_ironwood_session_prepare(db, &f->index[0], &f->bodies[0],
+        session_reader, NULL, f, &p) == UTXO_IRONWOOD_LOCAL_ERROR &&
+        !memcmp(&p, &before, sizeof p) && !table_exists(db, "ironwood_checkpoints");
+    utxo_ironwood_session_reset();
+    if (!sql(db, "ROLLBACK") || sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+static bool three_checkpoint_rows(sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT count(*) FROM ironwood_checkpoints", -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 3; // raw-sql-ok:test-fixture
+    sqlite3_finalize(s);
+    return ok;
+}
+static bool partial_populated_refused(struct session_fixture *f)
+{
+    utxo_ironwood_session_reset();
+    if (!sql(f->db, "BEGIN; DROP TABLE ironwood_checkpoint_state")) return false;
+    struct utxo_ironwood_pending p, before;
+    memset(&p, 0xa5, sizeof p); memcpy(&before, &p, sizeof p);
+    bool ok = session_prepare(f, 3, &p) == UTXO_IRONWOOD_LOCAL_ERROR &&
+        !memcmp(&p, &before, sizeof p) && !table_exists(f->db, "ironwood_checkpoint_state") && three_checkpoint_rows(f->db);
+    return sql(f->db, "ROLLBACK") && ok;
+}
 static bool corruption_refused(struct session_fixture *f)
 {
     utxo_ironwood_session_reset();
@@ -163,7 +205,7 @@ static bool corruption_refused(struct session_fixture *f)
 int test_utxo_apply_ironwood_session(void)
 {
     struct session_fixture f = {0};
-    bool ok = fixture_init(&f) && readonly_refusal(&f) && genesis_cases(&f) && first_transaction(&f) && cold_replay(&f) && corruption_refused(&f);
+    bool ok = fixture_init(&f) && readonly_refusal(&f) && genesis_cases(&f) && first_transaction(&f) && cold_replay(&f) && partial_empty_refused(&f) && partial_populated_refused(&f) && corruption_refused(&f);
     utxo_ironwood_session_reset();
     if (f.db && sqlite3_close(f.db) != SQLITE_OK) ok = false;
     for (size_t i = 0; i < 4; ++i) block_free(&f.bodies[i]);
