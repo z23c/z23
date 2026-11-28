@@ -11,6 +11,7 @@ AGENT_IMPACT_RULE("engine/services/src/research_profile.c|engine/services/includ
 AGENT_IMPACT_RULE("tools/command/native_fleet_objectives_lanes.c|tests/harness/src/agent_lanes_windows_acceptance.c", "fleet_objectives_tokens make_lint_gates")
 AGENT_IMPACT_RULE("platform/adapters/outbound/persistence/src/block_log_legacy.c|platform/adapters/outbound/persistence/include/adapters/outbound/persistence/block_log_legacy.h|tests/harness/src/test_block_log_legacy.c", "block_log_legacy make_lint_gates")
 AGENT_IMPACT_RULE("engine/services/src/research_frame.c|engine/services/include/services/research_frame.h|tests/harness/src/test_research_frame.c", "research_frame")
+AGENT_IMPACT_RULE("engine/services/src/research_digest.c|engine/services/include/services/research_digest.h|tests/harness/src/test_research_digest.c", "research_digest")
 AGENT_IMPACT_RULE("engine/services/src/research_schedule.c|engine/services/include/services/research_schedule.h|tests/harness/src/test_research_schedule.c", "research_schedule")
 AGENT_IMPACT_RULE("engine/services/src/research_merkle.c|engine/services/include/services/research_merkle.h|tests/harness/src/test_research_merkle.c", "research_merkle")
 AGENT_IMPACT_RULE("platform/modules/fdt/*|tests/harness/src/test_fdt.c", "test_fdt")
