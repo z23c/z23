@@ -8,6 +8,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/* Only an unavailable body uses this code; all contradictions fail separately. */
+enum { UTXO_IRONWOOD_HISTORY_BODY_MISSING = -2 };
 struct block;
 struct block_index;
 typedef bool (*ironwood_history_reader_fn)(struct block *, const struct block_index *,

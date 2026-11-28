@@ -81,7 +81,8 @@ static bool history_check_failure(struct ironwood_history_cursor *c, struct hist
     struct ironwood_history_event event, ebefore;
     memset(&out, 0xa5, sizeof out); memcpy(&before, &out, sizeof out);
     memset(&event, 0x5a, sizeof event); memcpy(&ebefore, &event, sizeof event);
-    return !utxo_ironwood_history_step(c, history_reader, NULL, f, &out, &event).ok &&
+    struct zcl_result r = utxo_ironwood_history_step(c, history_reader, NULL, f, &out, &event);
+    return !r.ok && ((r.code == UTXO_IRONWOOD_HISTORY_BODY_MISSING) == f->missing) &&
         !memcmp(&out, &before, sizeof out) && !memcmp(&event, &ebefore, sizeof event);
 }
 

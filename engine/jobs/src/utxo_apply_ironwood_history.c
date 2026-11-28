@@ -33,7 +33,7 @@ struct zcl_result utxo_ironwood_history_begin(const struct block_index *parent,
     const uint8_t *params = ironwood_resident_merkle_parameters(&size);
     struct zcl_result r = ironwood_note_frontier_extend(&next.frontier, NULL, 0,
                                                         params, size, next.root);
-    if (!r.ok) return r;
+    if (!r.ok) return ZCL_ERR(-1, "%s", r.message);
     *out = next;
     return ZCL_OK;
 }
@@ -73,13 +73,15 @@ static struct zcl_result history_fold(struct ironwood_history_cursor *next,
         if (is_v6) {
             struct zcl_result r = ironwood_frontier_append_v6(&next->frontier,
                 tx->v6_wire.data, tx->v6_wire.size, params, size);
-            if (!r.ok) return r;
+            if (!r.ok) return ZCL_ERR(-1, "%s", r.message);
         }
     }
     if (!domain_consensus_check_block_merkle_root(block, NULL, 0, NULL).ok)
         return ZCL_ERR(-1, "Ironwood history Merkle root mismatch");
-    if (next->frontier.count != count)
-        return ironwood_note_frontier_extend(&next->frontier, NULL, 0, params, size, next->root);
+    if (next->frontier.count != count) {
+        struct zcl_result r = ironwood_note_frontier_extend(&next->frontier, NULL, 0, params, size, next->root);
+        if (!r.ok) return ZCL_ERR(-1, "%s", r.message);
+    }
     return ZCL_OK;
 }
 
@@ -118,7 +120,7 @@ static struct zcl_result history_body(const struct ironwood_history_cursor *in,
     if (!(reader ? reader(&block, bi, datadir, user) :
                    stage_default_block_reader(&block, bi, datadir, user))) {
         block_free(&block);
-        return ZCL_ERR(-1, "Ironwood history block body unavailable");
+        return ZCL_ERR(UTXO_IRONWOOD_HISTORY_BODY_MISSING, "Ironwood history block body unavailable");
     }
     if (block.header.nSolutionSize > MAX_SOLUTION_SIZE) {
         block_free(&block);
@@ -132,7 +134,7 @@ static struct zcl_result history_body(const struct ironwood_history_cursor *in,
         r = ZCL_ERR(-1, "Ironwood history block header mismatch");
     else r = history_fold(next, &block);
     block_free(&block);
-    if (!r.ok) return r;
+    if (!r.ok) return ZCL_ERR(-1, "%s", r.message);
     event->available = true;
     event->height = in->replay_height;
     event->block_hash = hash;
