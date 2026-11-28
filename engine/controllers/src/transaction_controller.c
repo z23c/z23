@@ -8,6 +8,7 @@
 #include "controllers/transaction_controller_internal.h"
 #include "models/tx_index.h"
 #include "services/txindex_projection_service.h"
+#include "services/research_rules_tip.h"
 
 struct rawtx_context g_rawtx_ctx = {0};
 
@@ -480,6 +481,14 @@ static bool rpc_sendrawtransaction(const struct json_value *params, bool help,
     if (!decode_hex_tx(&tx, hex_str)) {
         transaction_free(&tx);
         json_set_str(result, "TX decode failed");
+        return false;
+    }
+
+    /* RPC policy samples the current tip. Relayed transactions are admitted
+     * by sealed code; the rule is enforced where validity is decided. */
+    if (research_tip_deposit_frozen(research_rules_tip(), &tx)) {
+        transaction_free(&tx);
+        json_set_str(result, "research-deposit-freeze: new net deposits into Sapling are frozen on this chain");
         return false;
     }
 
