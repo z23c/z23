@@ -44,6 +44,7 @@
 #include "util/safe_alloc.h"
 #include "util/util.h"  /* LogPrintf */
 #include "mining_controller_test_hooks.h"
+#include "mining_controller_failure.h"
 
 struct mining_context {
     struct main_state *main_state;
@@ -356,14 +357,12 @@ static bool mining_report_submit_failure(struct json_value *result, int height,
     struct json_value hashes = *result;
     json_init(result);
     json_set_object(result);
-    char reason[MAX_REJECT_REASON + 64], message[MAX_REJECT_REASON + 128];
-    format_state_message(state, reason, sizeof(reason));
-    snprintf(message, sizeof(message), "Mining failed at height %d: %s",
-             height, reason[0] ? reason : "reducer rejected block");
-    bool ok = json_push_kv_int(result, "code", -1) &&
+    char *message = mining_failure_message(&hashes, height, state);
+    bool ok = message && json_push_kv_int(result, "code", -1) &&
               json_push_kv_str(result, "message", message) &&
               json_push_kv_int(result, "height", height) &&
               json_push_kv(result, "hashes", &hashes);
+    free(message);
     json_free(&hashes);
     if (!ok) { json_set_str(result, "Cannot report mining failure"); LOG_FAIL("mining", "cannot report rejected block"); }
     return false;

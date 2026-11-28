@@ -21,6 +21,7 @@
 #include "storage/progress_store.h"
 #include "util/timedata.h"
 #include "consensus/validation.h"
+#include "rpc/client.h"
 #include <sqlite3.h>
 #include <string.h>
 
@@ -35,6 +36,7 @@ struct mining_failure_fixture {
     struct main_state *ms;
     struct block_index *next;
     int built, submitted;
+    char accepted_hash[65];
 };
 
 static void mining_count_template(void *ctx)
@@ -45,12 +47,39 @@ static void mining_count_template(void *ctx)
 static bool mining_fail_second_submit(struct block *block,
                                        struct validation_state *state, void *ctx)
 {
-    (void)block;
     struct mining_failure_fixture *f = ctx;
     if (++f->submitted == 1) {
+        struct uint256 hash;
+        block_get_hash(block, &hash);
+        uint256_get_hex(&hash, f->accepted_hash);
         return active_chain_move_window_tip(&f->ms->chain_active, f->next);
     }
     return validation_state_error(state, "fixture-second-submit");
+}
+
+static bool mining_cli_failure_visible(const struct json_value *error, const char *hash)
+{
+    struct json_value envelope = {0}, null = {0};
+    char raw[4096], rendered[4096] = {0};
+    json_set_object(&envelope);
+    json_set_null(&null);
+    bool ok = json_push_kv(&envelope, "error", error) && json_push_kv(&envelope, "result", &null);
+    size_t n = ok ? json_write(&envelope, raw, sizeof(raw)) : sizeof(raw);
+    FILE *out = tmpfile(), *err = tmpfile();
+    if (n >= sizeof(raw) || !out || !err) ok = false;
+    if (ok) {
+        ok = rpc_cli_print_json_result(raw, out, err) == 1;
+        rewind(err);
+        size_t got = fread(rendered, 1, sizeof(rendered) - 1, err);
+        rendered[got] = '\0';
+        ok = ok && strstr(rendered, hash) && strstr(rendered, "13") &&
+             strstr(rendered, "fixture-second-submit");
+    }
+    if (out) fclose(out);
+    if (err) fclose(err);
+    json_free(&null);
+    json_free(&envelope);
+    return ok;
 }
 
 static int mining_partial_failure(struct rpc_table *table, struct main_state *ms,
@@ -70,6 +99,11 @@ static int mining_partial_failure(struct rpc_table *table, struct main_state *ms
         !ok && hashes && json_size(hashes) == 1 && f.built == 2 &&
         f.submitted == 2 && json_get_int(json_get(&out, "height")) == 13 &&
         strstr(reason, "fixture-second-submit"));
+    MT_CHECK("partial failure message and CLI show accepted hash height and reason",
+        json_get_int(json_get(&out, "code")) == -1 && hashes &&
+        !strcmp(json_get_str(json_at(hashes, 0)), f.accepted_hash) &&
+        f.accepted_hash[0] && strstr(reason, f.accepted_hash) &&
+        strstr(reason, "13") && mining_cli_failure_visible(&out, f.accepted_hash));
     json_free(&params);
     json_free(&out);
     active_chain_move_window_tip(&ms->chain_active, &ancestors[11]);
