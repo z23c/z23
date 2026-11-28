@@ -17,6 +17,7 @@
  * variadic argument even in C23 mode.
  */
 
+LINT_GATE("check-capability-changed", check_capability_changed, LINT_CMD_PLAIN, 0)
 LINT_GATE("check-live-datadir-isolation", check_live_datadir_isolation, LINT_CMD_PAIR, 0)
 LINT_GATE("check-no-python", check_no_python, LINT_CMD_PAIR, 0)
 LINT_GATE("check-stage-log-reorg-unsafe", check_stage_log_reorg_unsafe, LINT_CMD_PAIR, 0)

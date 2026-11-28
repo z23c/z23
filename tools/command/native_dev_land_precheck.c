@@ -1226,6 +1226,12 @@ static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
         return PC_GATE_REFUSED;
     }
     pc_capture_windows_success(r, gate);
+    if (!strcmp(gate, PC_STRICT_GATE) &&
+        (strstr(r->out, "changed capability: WARNING") || strstr(r->out, "changed capability: UNPROVEN"))) {
+        char advisory[PC_TEXT_CAP];
+        (void)snprintf(advisory, sizeof advisory, "%s", r->out);
+        (void)json_push_kv_str(&reply->data, "precheck_advisory", advisory);
+    }
     r->ran[r->nran++] = gate;
     return PC_GATE_RAN;
 }

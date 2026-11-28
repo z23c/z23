@@ -1429,13 +1429,14 @@ static bool dlx_pc_size_clean(void)
 static bool dlx_pc_strict_rig(struct dlx_rig *rig, int mode)
 {
     static const char *const tag[] = {"strict_absent", "strict_clean", "strict_red",
-                                        "strict_notarget"};
+                                        "strict_notarget", "strict_advisory"};
     static const char *const rule[] = {
         "proof-compile-changed:\n\t@echo unused\n",
         "proof-compile-changed:\n\t@echo proof-compile-changed: OK\n",
         ("proof-compile-changed:\n\t@echo \"tests/harness/src/t.c:7:5: error: ignoring "
          "return value of fread [-Werror=unused-result]\"; exit 1\n"),
-        "other-target:\n\t@echo older lane Makefile\n"};
+        "other-target:\n\t@echo older lane Makefile\n",
+        "proof-compile-changed:\n\t@echo changed capability: WARNING candidate requires review\n"};
     char path[1400];
     if (!dlx_pc_rig(rig, tag[mode], true, "check-core-seal\n"))
         return false;
@@ -1463,9 +1464,10 @@ static bool dlx_pc_strict_case(int mode)
     ok = dlx_run(&c);
     if (mode == 2)
         ok = ok && dlx_pc_strict_refused(&c);
-    else if (mode == 1)
+    else if (mode == 1 || mode == 4)
         ok = ok && dlx_ok(&c) &&
-             dlx_pc_has(dlx_arr(&c, "precheck_ran"), "proof-compile-changed");
+             dlx_pc_has(dlx_arr(&c, "precheck_ran"), "proof-compile-changed") &&
+             (mode != 4 || strstr(dlx_str(&c, "precheck_advisory"), "changed capability: WARNING") != NULL);
     else
         ok = ok && dlx_ok(&c) &&
              dlx_pc_has(dlx_arr(&c, "precheck_skipped"), "proof-compile-changed") &&
@@ -1492,6 +1494,7 @@ static int dlx_pc_ratchet_cases(void)
         ASSERT(dlx_pc_strict_case(1));
         ASSERT(dlx_pc_strict_case(2));
         ASSERT(dlx_pc_strict_case(3)); /* epochs present, target missing: unproven */
+        ASSERT(dlx_pc_strict_case(4)); /* advisory is visible, submission stays allowed */
         PASS();
     }
     TEST("land: submit runs the file-size binary, and continues when it is missing") {
