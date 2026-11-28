@@ -62,7 +62,12 @@ enum research_rules_code {
     RESEARCH_RULES_UNAVAILABLE = -2
 };
 
-/* Supply the complete block for one ancestor. `out` is initialized by the
+/* A block body is authenticated only when both hold: `block_get_hash(blk)`
+ * equals `*bi->phashBlock`, and `domain_consensus_check_block_merkle_root`
+ * accepts `blk`, which binds its transactions to the hashed header. A header
+ * alone authenticates nothing: the ballots are in the coinbase.
+ *
+ * Supply the complete block for one ancestor. `out` is initialized by the
  * caller with block_init and owned by the caller. Return false when the body
  * is unavailable. */
 typedef bool (*research_rules_read_fn)(void *ctx, const struct block_index *bi,
@@ -92,8 +97,9 @@ struct research_rules_tracker;
 struct research_rules_tracker *research_rules_tracker_create(
     const struct research_rules_binding *binding);
 void research_rules_tracker_destroy(struct research_rules_tracker *tracker);
-/* Connect one authenticated block. `blk` must hash to `bi`'s block hash and
- * extend the block connected before it. The first connected block must lie at
+/* Connect one authenticated block. `blk` must pass the body authentication
+ * above against `bi` and extend the block connected before it. A failed
+ * authentication is `RESEARCH_RULES_UNAVAILABLE`. The first connected block must lie at
  * or below the window parent; a sweep that starts higher cannot use the
  * tracker and resolves through research_rules_for_parent instead. A failure
  * leaves the tracker unchanged. */
