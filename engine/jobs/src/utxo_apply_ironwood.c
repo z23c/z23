@@ -100,6 +100,28 @@ static enum utxo_ironwood_result fold_block(const struct block *block,
     return UTXO_IRONWOOD_OK;
 }
 
+static enum utxo_ironwood_result finish_prepare(const struct block_index *bi,
+    const struct utxo_ironwood_parent *parent, struct ironwood_note_frontier *tree,
+    bool has_actions, const uint8_t *params, size_t size, struct utxo_ironwood_pending *out)
+{
+    struct utxo_ironwood_pending pending = {0};
+    pending.checkpoint.height = bi->nHeight;
+    pending.checkpoint.count = has_actions ? tree->count : parent->count;
+    memcpy(pending.checkpoint.block_hash, bi->phashBlock->data, 32);
+    memcpy(pending.parent_hash, bi->pprev->phashBlock->data, 32);
+    pending.changed = has_actions;
+    if (pending.changed) {
+        if (!ironwood_note_frontier_extend(tree, NULL, 0, params, size, pending.checkpoint.root).ok ||
+            !ironwood_frontier_encode(tree, pending.checkpoint.payload,
+                sizeof pending.checkpoint.payload, &pending.checkpoint.payload_size).ok)
+            return UTXO_IRONWOOD_LOCAL_ERROR;
+    } else {
+        memcpy(pending.checkpoint.root, parent->root, 32);
+    }
+    *out = pending;
+    return UTXO_IRONWOOD_OK;
+}
+
 enum utxo_ironwood_result utxo_apply_ironwood_prepare(
     struct ironwood_checkpoint_session *session, const struct block_index *bi,
     const struct block *block, const struct utxo_ironwood_parent *parent,
@@ -120,21 +142,5 @@ enum utxo_ironwood_result utxo_apply_ironwood_prepare(
         r = fold_block(block, params, size, &tree);
         if (r != UTXO_IRONWOOD_OK) return r;
     }
-    struct utxo_ironwood_pending pending = {0};
-    pending.checkpoint.height = bi->nHeight;
-    pending.checkpoint.count = has_actions ? tree.count : parent->count;
-    memcpy(pending.checkpoint.block_hash, bi->phashBlock->data, 32);
-    memcpy(pending.parent_hash, bi->pprev->phashBlock->data, 32);
-    pending.changed = has_actions;
-    if (pending.changed) {
-        if (!ironwood_note_frontier_extend(&tree, NULL, 0, params, size, pending.checkpoint.root).ok)
-            return UTXO_IRONWOOD_LOCAL_ERROR;
-    } else {
-        memcpy(pending.checkpoint.root, parent->root, 32);
-    }
-    if (pending.changed && !ironwood_frontier_encode(&tree, pending.checkpoint.payload,
-            sizeof pending.checkpoint.payload, &pending.checkpoint.payload_size).ok)
-        return UTXO_IRONWOOD_LOCAL_ERROR;
-    *out = pending;
-    return UTXO_IRONWOOD_OK;
+    return finish_prepare(bi, parent, &tree, has_actions, params, size, out);
 }
