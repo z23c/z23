@@ -42,6 +42,10 @@ static bool row(char value[6][65], size_t index)
     pallas_point_add(&r,&a,&b); if (!matches(&r,value[4],value[5])) return false;
     copy = a; pallas_point_add(&copy,&copy,&b); if (!matches(&copy,value[4],value[5])) return false;
     copy = b; pallas_point_add(&copy,&a,&copy); if (!matches(&copy,value[4],value[5])) return false;
+    copy = a; scale_point(&copy); pallas_point_add(&r,&copy,&b);
+    if (!matches(&r,value[4],value[5])) return false;
+    copy = b; scale_point(&copy); pallas_point_add(&r,&a,&copy);
+    if (!matches(&r,value[4],value[5])) return false;
     scale_point(&a); scale_point(&b); pallas_point_add(&r,&a,&b);
     if (!matches(&r,value[4],value[5])) return false;
     if (index == 0 || index == 3) {
