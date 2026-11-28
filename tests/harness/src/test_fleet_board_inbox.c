@@ -1303,6 +1303,167 @@ static int test_fbi_cli_budget(void)
     return failures;
 }
 
+static bool fbi_seed_worst(struct fbi_fixture *f, char *agent, char *ref,
+                           struct fleet_board_post posts[30])
+{
+    struct fleet_board_post parent;
+    char text[181];
+    memset(agent, 'a', FLEET_BOARD_AGENT_MAX);
+    agent[FLEET_BOARD_AGENT_MAX] = '\0';
+    if (!fbi_post(f, 1, FLEET_BOARD_KIND_PROBLEM, FLEET_BOARD_SCOPE_PUBLIC,
+                  agent, "question", NULL, NULL, f->now, f->now, &parent))
+        return false;
+    fleet_board_id_to_hex(parent.id, ref);
+    for (unsigned i = 0; i < 30; i++) {
+        memset(text, 'a' + (int)(i % 26), sizeof(text) - 1);
+        text[sizeof(text) - 1] = '\0';
+        if (!fbi_post(f, 5, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_PUBLIC,
+                      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                      text, parent.id, NULL, f->now + i, f->now + i, &posts[i]))
+            return false;
+    }
+    return sqlite3_exec(f->db.db,
+        "UPDATE fleet_board_posts SET arrival=arrival+1000000000000000000",
+        NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static bool fbi_worst_input(struct json_value *input, const char *agent,
+                            const char *ref, int64_t after)
+{
+    json_init(input);
+    json_set_object(input);
+    return json_push_kv_str(input, "agent", agent) &&
+           json_push_kv_str(input, "ref", ref) &&
+           json_push_kv_int(input, "after", after);
+}
+
+/* On refusal, measure the rejected projection with a widened serializer cap. */
+static size_t fbi_rejected_wire(const struct zcl_command_registry *reg,
+                                const struct zcl_command_spec *spec,
+                                const struct json_value *input)
+{
+    struct zcl_command_request request = {.spec = spec, .input = input,
+        .budget_bytes = 4096, .success_data_budget_provided = true,
+        .success_data_budget = 3800};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, spec->output_schema);
+    zcl_native_handle_fleet_board_inbox(&request, &reply);
+    struct zcl_command_spec wide = *spec;
+    wide.budget_bytes = 8192;
+    struct zcl_command_budget_fixture fixture = {.budget_bytes = 8192};
+    char wire[8193];
+    size_t n = zcl_command_registry_test_reply_wire_fixture(reg, &wide, &reply,
+                                                           &fixture, wire, sizeof(wire));
+    zcl_command_reply_free(&reply);
+    return n;
+}
+
+static int test_fbi_cli_worst_budget(void)
+{
+    int failures = 0;
+    TEST("board inbox CLI: worst identifiers and unvouched rows fit every wire page") {
+        static const uint8_t denied = 5;
+        struct fbi_fixture f;
+        struct fleet_board_post posts[30];
+        char agent[FLEET_BOARD_AGENT_MAX + 1], ref[65], wire[8192];
+        struct json_value input, result, node;
+        ASSERT(fbi_open(&f, "worst-budget"));
+        ASSERT(fbi_seed_worst(&f, agent, ref, posts));
+        fbi_roles_deny(&denied);
+        g_fbi_table = &f.table;
+        node_rpc_client_set_test_hook(fbi_hook);
+        ASSERT(fbi_inbox(&f, "inbox", agent, 0, 0, posts[0].ref, -1, &node));
+        ASSERT(json_get_bool(json_get(&node, "has_more")));
+        ASSERT_EQ(json_size(json_get(&node, "rows")), 20u);
+        json_free(&node);
+        const struct zcl_command_registry *reg = zcl_command_catalog();
+        const struct zcl_command_spec *spec =
+            zcl_command_registry_find(reg, "fleet.board.inbox", NULL);
+        struct zcl_command_context ctx = {.registry = reg,
+            .granted_capabilities = ~(uint64_t)0, .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+        ASSERT(spec);
+        int64_t after = 0;
+        size_t seen = 0, pages = 0;
+        bool more;
+        do {
+            ASSERT(fbi_worst_input(&input, agent, ref, after));
+            enum zcl_command_exit rc;
+            size_t n = zcl_command_registry_execute_json(reg, spec, &ctx, &input,
+                false, "fleet.board.inbox", "normal", 4096, 0, NULL,
+                wire, sizeof(wire), &rc);
+            fprintf(stderr, "worst inbox page=%zu wire=%zu rc=%d\n", pages + 1, n, (int)rc);
+            if (rc != ZCL_COMMAND_EXIT_OK)
+                fprintf(stderr, "rejected projection wire=%zu cap=4096\n",
+                        fbi_rejected_wire(reg, spec, &input));
+            ASSERT(n > 0 && n <= 4096 && rc == ZCL_COMMAND_EXIT_OK);
+            json_init(&result);
+            ASSERT(json_read(&result, wire, n));
+            const struct json_value *data = json_get(&result, "data");
+            const struct json_value *rows = json_get(data, "rows");
+            size_t count = json_size(rows);
+            ASSERT(count > 0 && count == (size_t)json_get_int(json_get(data, "returned")));
+            ASSERT(json_get(data, "trust_note"));
+            if (pages == 0) {
+                ASSERT_STR_EQ(json_get_str(json_get(data, "stopped_by")), "byte_budget");
+                ASSERT(json_get_bool(json_get(data, "truncated_by_budget")));
+                ASSERT(json_get_bool(json_get(data, "has_more")));
+            }
+            for (size_t i = 0; i < count; i++) {
+                const struct json_value *row = json_at(rows, i);
+                ASSERT(seen < 30 && fbi_id_is(json_get_str(json_get(row, "id")), &posts[seen]));
+                ASSERT(!json_get_bool(json_get(row, "author_role")));
+                int64_t arrival = json_get_int(json_get(row, "arrival"));
+                ASSERT(arrival > after);
+                after = arrival;
+                seen++;
+            }
+            ASSERT_EQ(json_get_int(json_get(data, "next_after")), after);
+            more = json_get_bool(json_get(data, "has_more"));
+            if (!more)
+                ASSERT_STR_EQ(json_get_str(json_get(data, "stopped_by")), "end");
+            pages++;
+            ASSERT(pages <= 30);
+            json_free(&result);
+            json_free(&input);
+        } while (more);
+        ASSERT_EQ(seen, 30u);
+        node_rpc_client_set_test_hook(NULL);
+        g_fbi_table = NULL;
+        fbi_close(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fbi_cli_no_row_budget(void)
+{
+    int failures = 0;
+    TEST("board inbox CLI: a first row that cannot fit fails in the handler") {
+        struct fbi_fixture f;
+        struct fbi_board b;
+        struct json_value input;
+        struct zcl_command_reply reply;
+        ASSERT(fbi_open(&f, "too-small"));
+        ASSERT(fbi_seed(&f, &b));
+        g_fbi_table = &f.table;
+        node_rpc_client_set_test_hook(fbi_hook);
+        ASSERT(fbi_worst_input(&input, "lane-a", "", 0));
+        struct zcl_command_request request = {.input = &input, .budget_bytes = 256};
+        zcl_command_reply_init(&reply, "zcl.fleet_board_inbox.v1");
+        zcl_native_handle_fleet_board_inbox(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(reply.error.code, "BOARD_PAGE_BUDGET");
+        ASSERT(!json_get(&reply.data, "rows"));
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        node_rpc_client_set_test_hook(NULL);
+        g_fbi_table = NULL;
+        fbi_close(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_fleet_board_inbox(void)
 {
     int failures = 0;
@@ -1322,5 +1483,7 @@ int test_fleet_board_inbox(void)
     failures += test_fbi_delivery_dropped();
     failures += test_fbi_cli();
     failures += test_fbi_cli_budget();
+    failures += test_fbi_cli_worst_budget();
+    failures += test_fbi_cli_no_row_budget();
     return failures;
 }

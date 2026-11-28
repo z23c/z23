@@ -154,7 +154,6 @@ static int64_t fbi_next_after(const struct json_value *body, int64_t fallback)
     return v && v->type == JSON_INT ? json_get_int(v) : fallback;
 }
 
-/* Keep the same envelope allowance used by the board list projection. */
 static size_t fbi_cap(const struct zcl_command_request *request)
 {
     size_t cap = request->spec && request->spec->budget_bytes
@@ -162,6 +161,30 @@ static size_t fbi_cap(const struct zcl_command_request *request)
     if (request->budget_bytes && request->budget_bytes < cap)
         cap = request->budget_bytes;
     return cap;
+}
+
+/* The registry's empty-next allowance excludes the item. Measure its full
+ * object with the widest signed cursor, plus 10 bytes for ,"next":[] in a
+ * compact envelope (the normal envelope already contains that empty array). */
+static bool fbi_next_reserve(const struct fbi_req *r, size_t *reserve)
+{
+    struct json_value input, item;
+    json_init(&input);
+    json_set_object(&input);
+    json_init(&item);
+    json_set_object(&item);
+    bool ok = (!r->agent[0] || json_push_kv_str(&input, "agent", r->agent)) &&
+              json_push_kv_int(&input, "after", INT64_MIN) &&
+              (!r->ref[0] || json_push_kv_str(&input, "ref", r->ref)) &&
+              json_push_kv_str(&item, "command", "fleet.board.wait") &&
+              json_push_kv(&item, "input", &input) &&
+              json_push_kv_str(&item, "reason",
+                  "block until the next row for you arrives, from this cursor");
+    if (ok)
+        *reserve = json_write(&item, NULL, 0) + 10;
+    json_free(&item);
+    json_free(&input);
+    return ok;
 }
 
 static bool fbi_page_copy(struct json_value *data, const struct json_value *body)
@@ -243,23 +266,54 @@ static bool fbi_page_fields(struct json_value *data, const struct json_value *bo
          fbi_page_commands(data, r, *cursor);
 }
 
+/* Serialize the non-row data at its widest: 20-digit signed integers, the
+ * longer false booleans, byte-budget notice and any node trust note. The
+ * row loop adds each serialized row plus a comma (one byte conservative). */
+static bool fbi_page_measure(struct json_value *data, const struct json_value *body,
+                             const struct fbi_req *r, size_t cap, size_t *used)
+{
+    struct json_value rows;
+    json_init(&rows);
+    json_set_array(&rows);
+    const struct json_value *trust = json_get(body, "trust_note");
+    bool ok = fbi_page_copy(data, body) && json_push_kv(data, "rows", &rows) &&
+              json_push_kv_int(data, "returned", INT64_MIN) &&
+              (!trust || (json_push_kv_int(data, "unvouched", INT64_MIN) &&
+                          json_push_kv(data, "trust_note", trust))) &&
+              json_push_kv_int(data, "next_after", INT64_MIN) &&
+              fbi_page_metadata(data, cap, true, false) &&
+              fbi_page_commands(data, r, INT64_MIN);
+    if (ok)
+        *used = json_write(data, NULL, 0) + 1; /* false is longer than true */
+    json_free(&rows);
+    return ok;
+}
+
 static bool fbi_page_project(const struct zcl_command_request *request,
                              struct zcl_command_reply *reply,
                              const struct json_value *body, struct fbi_req *r)
 {
     const struct json_value *source = json_get(body, "rows");
-    struct json_value rows, data;
+    struct json_value rows, data, measured;
     json_init(&rows);
     json_set_array(&rows);
     json_init(&data);
     json_set_object(&data);
+    json_init(&measured);
+    json_set_object(&measured);
     size_t cap = fbi_cap(request);
-    bool ok = source && source->type == JSON_ARR && fbi_page_copy(&data, body);
-    size_t used = json_write(&data, NULL, 0) + 400;
-    size_t max = cap > 1024 ? cap - 1024 : 0;
+    size_t allowance = request->success_data_budget_provided
+        ? request->success_data_budget : (cap > 1024 ? cap - 1024 : 0);
+    size_t used = 0, next = 0;
+    bool ok = source && source->type == JSON_ARR &&
+              fbi_page_copy(&data, body) &&
+              fbi_page_measure(&measured, body, r, cap, &used) &&
+              fbi_next_reserve(r, &next);
+    size_t max = allowance > next ? allowance - next : 0;
     unsigned unvouched = 0;
     int64_t cursor = r->after;
-    ok = ok && fbi_page_rows(source, &rows, used, max, &unvouched) &&
+    ok = ok && used <= max &&
+         fbi_page_rows(source, &rows, used, max, &unvouched) &&
          fbi_page_fields(&data, body, &rows, r, cap, unvouched, &cursor);
     if (ok) {
         json_free(&reply->data);
@@ -273,6 +327,7 @@ static bool fbi_page_project(const struct zcl_command_request *request,
                                "the inbox page could not fit or be allocated",
                                "fleet.board.inbox");
     }
+    json_free(&measured);
     json_free(&rows);
     return ok;
 }
