@@ -29,8 +29,8 @@ static struct zcl_result frontier_root(const struct ironwood_note_frontier *tree
     const uint8_t *params, size_t size, uint8_t root[32])
 {
     if (tree->count == NOTE_CAPACITY) {
-        if (!ironwood_merkle_parameters_valid(params, size))
-            return ZCL_ERR(-1, "Invalid Ironwood Merkle parameters");
+        struct zcl_result pin = ironwood_merkle_parameters_validate(params, size);
+        if (!pin.ok) return pin;
         struct zcl_result r = ironwood_pasta_fp_canonical(tree->slots[IRONWOOD_NOTE_TREE_DEPTH]);
         if (r.ok) memcpy(root, tree->slots[IRONWOOD_NOTE_TREE_DEPTH], 32);
         return r;
