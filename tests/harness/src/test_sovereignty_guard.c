@@ -27,6 +27,7 @@
 #include "test/test_core.h"
 
 #include "controllers/sovereignty_controller.h"
+#include "controllers/mining_controller.h"
 #include "controllers/wallet_controller.h"
 #include "controllers/wallet_view_internal.h"
 #include "controllers/zslp_controller.h"
@@ -370,12 +371,26 @@ int test_sovereignty_guard(void)
         rpc_table_init(&tbl);
         register_wallet_rpc_commands(&tbl);
         register_zslp_rpc_commands(&tbl);
+        register_mining_rpc_commands(&tbl);
         set_rpc_warmup_finished();
         struct json_value params = {0};
         struct json_value result = {0};
         json_init(&params);
         json_init(&result);
         json_set_array(&params);
+        {
+            struct json_value mining_params = {0}, mining_result = {0};
+            const char *raw = "[1,\"t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn\"]";
+            bool parsed = json_read(&mining_params, raw, strlen(raw));
+            int before = reducer_frontier_provable_tip_cached();
+            bool refused = parsed && !rpc_table_execute(&tbl, "generatetoaddress",
+                                                         &mining_params, &mining_result);
+            SG_CHECK("borrowed: generatetoaddress refuses without a block",
+                     refused && sg_rpc_body_has(&mining_result, "release_assisted") &&
+                     reducer_frontier_provable_tip_cached() == before);
+            json_free(&mining_params);
+            json_free(&mining_result);
+        }
         SG_CHECK("borrowed: sendtoaddress RPC refused",
                  !rpc_table_execute(&tbl, "sendtoaddress", &params, &result));
         SG_CHECK("borrowed: sendtoaddress body names release_assisted",

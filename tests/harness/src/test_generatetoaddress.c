@@ -39,18 +39,21 @@
 #include "chain/subsidy.h"
 #include "consensus/validation.h"
 #include "controllers/mining_controller.h"
+#include "controllers/sovereignty_controller.h"
 #include "core/arith_uint256.h"
 #include "core/uint256.h"
 #include "domain/consensus/coinbase.h"
 #include "domain/consensus/upgrades.h"
 #include "keys/key_io.h"
 #include "keys/pubkey.h"
+#include "jobs/reducer_frontier.h"
 #include "mining/miner.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "sapling/incremental_merkle_tree.h"
 #include "script/script.h"
 #include "script/standard.h"
+#include "rpc/server.h"
 #include "storage/anchor_kv.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
@@ -71,6 +74,48 @@ static bool gta_encode(const struct tx_destination *dest,
     const unsigned char *sc =
         chain_params_base58_prefix(cp, B58_SCRIPT_ADDRESS, &sc_len);
     return encode_destination(dest, pk, pk_len, sc, sc_len, out, out_size);
+}
+
+static int gta_testnet_refusal(const struct tx_destination *dest)
+{
+    int failures = 0;
+    char dir[512] = {0}, address[128] = {0}, raw[180];
+    struct json_value params = {0}, result = {0};
+    struct rpc_table table;
+    uint8_t txid[32] = {0x43};
+    bool opened = test_mkdtemp(dir, sizeof(dir), "gta_guard") && progress_store_open(dir);
+    sqlite3 *db = opened ? progress_store_db() : NULL;
+    reducer_frontier_provable_tip_set(50);
+    bool ready = db && coins_kv_ensure_schema(db) &&
+        coins_kv_add(db, txid, 0, 5000, 50, true, NULL, 0) &&
+        sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK &&
+        coins_kv_set_applied_height_in_tx(db, 51) &&
+        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK &&
+        coins_kv_mark_migration_complete(db) && coins_kv_mark_self_folded(db);
+    chain_params_select(CHAIN_TESTNET);
+    ready = ready && gta_encode(dest, address, sizeof(address));
+    snprintf(raw, sizeof(raw), "[1,\"%s\"]", address);
+    rpc_table_init(&table);
+    register_mining_rpc_commands(&table);
+    set_rpc_warmup_finished();
+    char reason[96] = {0};
+    ready = ready && sovereignty_guard_allow("mint", reason, sizeof(reason)) &&
+        json_read(&params, raw, strlen(raw));
+    int before = reducer_frontier_provable_tip_cached();
+    bool refused = ready && !rpc_table_execute(&table, "generatetoaddress", &params, &result);
+    bool ok = refused && result.type == JSON_STR &&
+        strstr(json_get_str(&result), "regtest only") &&
+        reducer_frontier_provable_tip_cached() == before;
+    printf("generatetoaddress: testnet refuses on-demand mining without a block... %s\n",
+           ok ? "OK" : "FAIL");
+    if (!ok) failures++;
+    json_free(&params);
+    json_free(&result);
+    chain_params_select(CHAIN_MAIN);
+    reducer_frontier_provable_tip_reset();
+    if (opened) progress_store_close();
+    if (dir[0]) test_rm_rf(dir);
+    return failures;
 }
 
 /* Decode an address with the ACTIVE chain's prefixes — verbatim what
@@ -440,6 +485,7 @@ int test_generatetoaddress(void)
     chain_params_select(CHAIN_MAIN);
     char mainnet_addr[128] = {0};
     bool main_encoded = gta_encode(&want, mainnet_addr, sizeof(mainnet_addr));
+    failures += gta_testnet_refusal(&want);
 
     /* ── (0) the gate itself: generatetoaddress, the regtest wallet-projection
      * feed in tip_finalize_post_step and wallet_advance_confirmations sit
