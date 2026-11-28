@@ -106,16 +106,22 @@ static bool history_refusals(struct ironwood_history_cursor *c, struct history_f
     return true;
 }
 
+static bool history_start(struct history_fixture *f, const struct block_index **slots,
+                          struct ironwood_history_cursor *c)
+{
+    struct ironwood_history_event e;
+    return utxo_ironwood_history_begin(&f->index[1], slots, 2, c).ok &&
+        history_step_ok(c, f, &e) && !e.available &&
+        history_step_ok(c, f, &e) && !e.available &&
+        history_step_ok(c, f, &e) && e.available && e.height == 0 && e.count == 0;
+}
+
 static bool history_positive(struct history_fixture *f)
 {
     const struct block_index *slots[2] = {0};
     struct ironwood_history_cursor c;
     struct ironwood_history_event e;
-    if (!utxo_ironwood_history_begin(&f->index[1], slots, 2, &c).ok ||
-        !history_step_ok(&c, f, &e) || e.available ||
-        !history_step_ok(&c, f, &e) || e.available ||
-        !history_step_ok(&c, f, &e) || !e.available || e.height != 0 || e.count != 0)
-        return false;
+    if (!history_start(f, slots, &c)) return false;
     if (!history_refusals(&c, f)) return false;
     uint8_t expected[32];
     return history_step_ok(&c, f, &e) && e.available && e.height == 1 &&
