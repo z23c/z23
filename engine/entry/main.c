@@ -1170,9 +1170,16 @@ static bool main_research_unselected_ok(int argc, char **argv)
 
 static bool main_research_direct_mode(int argc, char **argv)
 {
-    return argc > 1 && !strncmp(argv[1], "--", 2) &&
-        strcmp(argv[1], "--agent") && strcmp(argv[1], "--status") &&
-        strcmp(argv[1], "--summary");
+    bool before_word = true;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--importblockindex")) return true;
+        if (before_word && !strcmp(argv[i], "--importchainstate")) return true;
+        if (i == 1 && !strncmp(argv[i], "--", 2) &&
+            strcmp(argv[i], "--agent") && strcmp(argv[i], "--status") &&
+            strcmp(argv[i], "--summary")) return true;
+        if (argv[i][0] != '-') before_word = false;
+    }
+    return false;
 }
 
 static bool main_research_prepare(int argc, char ***args,

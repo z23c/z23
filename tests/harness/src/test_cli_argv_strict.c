@@ -1512,6 +1512,10 @@ static int cas_test_unsupported_profile(void)
         ASSERT(cas_run(late, home, out, sizeof(out)) != 0);
         ASSERT(!cas_contains(out, "error=UNSUPPORTED_PROFILE"));
         ASSERT(cas_contains(out, "no RPC cookie"));
+        char *late_long[] = {CAS_BIN, dirarg, "sentinel", "--testnet-profile=ironwood", NULL};
+        ASSERT(cas_run(late_long, home, out, sizeof(out)) != 0);
+        ASSERT(!cas_contains(out, "Invalid or unsafe testnet profile invocation."));
+        ASSERT(cas_contains(out, "no RPC cookie"));
         test_cleanup_tmpdir(home);
         PASS();
     } _test_next:;
@@ -1662,6 +1666,32 @@ static int cas_test_research_direct_refuses(void)
             char *argv[] = {(char *)CAS_BIN, (char *)"--importchainstate",
                             home, target, (char *)selectors[i], NULL};
             int rc = cas_run(argv, home, out, sizeof(out));
+            struct stat st;
+            refused = refused && rc != 0 &&
+                strstr(out, "Invalid or unsafe testnet profile invocation.") &&
+                lstat(target, &st) != 0 && errno == ENOENT;
+        }
+        (void)test_rm_rf_recursive(home);
+        ASSERT(refused);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int cas_test_research_reordered_direct(void)
+{
+    int failures = 0;
+    TEST("reordered imports refuse research selectors before writing") {
+        char home[PATH_MAX], target[PATH_MAX + 32], flag[PATH_MAX + 16], out[8192];
+        ASSERT(test_mkdtemp(home, sizeof home, "cas_research_reordered") != NULL);
+        ASSERT(snprintf(target, sizeof target, "%s/target", home) > 0);
+        ASSERT(snprintf(flag, sizeof flag, "-datadir=%s", home) > 0);
+        const char *verbs[] = {"--importblockindex", "--importchainstate"};
+        bool refused = true;
+        for (size_t i = 0; i < sizeof verbs / sizeof verbs[0]; i++) {
+            char *argv[] = {(char *)CAS_BIN, flag, (char *)verbs[i], home, target,
+                            (char *)"-testnet-profile=ironwood", NULL};
+            int rc = cas_run(argv, home, out, sizeof out);
             struct stat st;
             refused = refused && rc != 0 &&
                 strstr(out, "Invalid or unsafe testnet profile invocation.") &&
@@ -1927,6 +1957,7 @@ int test_cli_argv_strict(void)
     failures += cas_test_research_refusals();
     failures += cas_test_research_unmarked_refuses();
     failures += cas_test_research_direct_refuses();
+    failures += cas_test_research_reordered_direct();
     failures += cas_test_research_marker_guards();
     failures += cas_test_research_empty_mode();
     failures += cas_test_research_private_directory();
