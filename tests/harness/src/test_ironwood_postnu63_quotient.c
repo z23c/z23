@@ -2,6 +2,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_postnu63.h"
 #include "services/ironwood_postnu63_quotient.h"
+#include "services/ironwood_postnu63_gates.h"
 #include "base/hex.h"
 #include <stdio.h>
 #include <string.h>
@@ -60,6 +61,92 @@ static int quotient_refusals(void)
     return 0;
 }
 
+static bool fixture_read(const char *path, uint8_t *out, size_t size)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    bool ok = fread(out, 1, size, f) == size && fgetc(f) == EOF;
+    return fclose(f) == 0 && ok;
+}
+
+/* This serializes exactly the upstream 193 postfix expressions, whose
+ * source RPN text SHA-256 is 08bb64dc0293aafcb82e61f5483c6830689d4965ea91b4088e71f6cbcfa5518f.
+ * The fixture is research data, not an authenticated verifier key. */
+static int gate_refusals(struct ironwood_postnu63_stage *stage, const uint8_t *program, size_t program_size)
+{
+    uint8_t out[IRONWOOD_POSTNU63_GATE_BYTES], before[IRONWOOD_POSTNU63_GATE_BYTES];
+    struct ironwood_postnu63_stage snapshot;
+    memset(out, 0xa5, sizeof out); memcpy(before, out, sizeof out); memcpy(&snapshot, stage, sizeof snapshot);
+    Q_CHECK(!ironwood_postnu63_custom_gates(stage, 0, program, program_size - 1, out, sizeof out).ok);
+    const uint8_t bad_query[] = {'F', 29, 'E'}, underflow[] = {'M', 'E'}, bad_op[] = {'Z'};
+    Q_CHECK(!ironwood_postnu63_custom_gates(stage, 0, bad_query, sizeof bad_query, out, sizeof out).ok);
+    Q_CHECK(!ironwood_postnu63_custom_gates(stage, 0, underflow, sizeof underflow, out, sizeof out).ok);
+    Q_CHECK(!ironwood_postnu63_custom_gates(stage, 0, bad_op, sizeof bad_op, out, sizeof out).ok);
+    uint8_t overflow[129 * 2];
+    for (size_t i = 0; i < 129; ++i) { overflow[2*i] = 'F'; overflow[2*i+1] = 0; }
+    Q_CHECK(!ironwood_postnu63_custom_gates(stage, 0, overflow, sizeof overflow, out, sizeof out).ok);
+    Q_CHECK(!ironwood_postnu63_custom_gates(stage, stage->actions, program, program_size, out, sizeof out).ok);
+    Q_CHECK(!ironwood_postnu63_custom_gates(stage, 0, program, program_size, out, sizeof out - 1).ok);
+    Q_CHECK(!memcmp(out, before, sizeof out) && !memcmp(stage, &snapshot, sizeof snapshot));
+    return 0;
+}
+
+static int gate_bad_inputs(struct ironwood_postnu63_stage *stage, const uint8_t *program,
+                           size_t program_size, uint8_t *proof)
+{
+    uint8_t out[IRONWOOD_POSTNU63_GATE_BYTES], before[IRONWOOD_POSTNU63_GATE_BYTES], saved[32];
+    memset(out, 0xa5, sizeof out); memcpy(before, out, sizeof out);
+    const uint8_t bad_advice[] = {'A', 25}, short_constant[] = {'C', 1};
+    Q_CHECK(!ironwood_postnu63_custom_gates(stage, 0, bad_advice, sizeof bad_advice, out, sizeof out).ok);
+    Q_CHECK(!ironwood_postnu63_custom_gates(stage, 0, short_constant, sizeof short_constant, out, sizeof out).ok);
+    struct ironwood_postnu63_stage invalid = *stage;
+    invalid.proof.buffer = NULL;
+    Q_CHECK(!ironwood_postnu63_custom_gates(&invalid, 0, program, program_size, out, sizeof out).ok);
+    invalid = *stage; ++invalid.fixed_eval_offset;
+    Q_CHECK(!ironwood_postnu63_custom_gates(&invalid, 0, program, program_size, out, sizeof out).ok);
+    uint8_t *first_fixed = proof + stage->fixed_eval_offset + 18 * 32;
+    memcpy(saved, first_fixed, sizeof saved); memset(first_fixed, 0xff, sizeof saved);
+    bool refused = !ironwood_postnu63_custom_gates(stage, 0, program, program_size, out, sizeof out).ok;
+    memcpy(first_fixed, saved, sizeof saved);
+    Q_CHECK(refused && !memcmp(out, before, sizeof out));
+    return 0;
+}
+
+static int gate_case(const char *proof_path, const char *terms_path, size_t actions,
+                     const uint8_t *program, size_t program_size, const char *expected_h)
+{
+    uint8_t proof[7590], input[(2 + 2 * 215) * 32], values[IRONWOOD_POSTNU63_GATE_BYTES], expected[32], h[32];
+    size_t proof_size = 2720 + actions * 2272, term_size = actions * 215 * 32;
+    Q_CHECK(fixture_read(proof_path, proof, 163 * actions + proof_size));
+    Q_CHECK(fixture_read(terms_path, input, 64 + term_size));
+    Q_CHECK(zcl_hex_decode(expected_h, expected, 32));
+    struct ironwood_postnu63_stage stage = {0};
+    stage.actions = actions; stage.phase = IRONWOOD_POSTNU63_EVAL_X1;
+    stage.proof.buffer = proof + 163 * actions; stage.proof.length = proof_size; stage.proof.position = proof_size - 992;
+    stage.advice_eval_offset = 736 * actions + 288; stage.fixed_eval_offset = 1536 * actions + 288;
+    memcpy(stage.y, input, 32); memcpy(stage.x, input + 32, 32);
+    for (size_t a = 0; a < actions; ++a) {
+        Q_CHECK(ironwood_postnu63_custom_gates(&stage, a, program, program_size, values, sizeof values).ok);
+        Q_CHECK(!memcmp(values, input + 64 + a * 215 * 32, sizeof values));
+        memcpy(input + 64 + a * 215 * 32, values, sizeof values);
+    }
+    Q_CHECK(ironwood_postnu63_expected_h(&stage, input + 64, term_size, h).ok && !memcmp(h, expected, 32));
+    Q_CHECK(!gate_refusals(&stage, program, program_size));
+    Q_CHECK(!gate_bad_inputs(&stage, program, program_size, proof + 163 * actions));
+    return 0;
+}
+
+static int gate_cases(void)
+{
+    uint8_t program[48484];
+    Q_CHECK(fixture_read("tests/fixtures/ironwood/postnu63-custom-gates.bin", program, sizeof program));
+    Q_CHECK(!gate_case("tests/fixtures/ironwood/postnu63-coinbase.bin", "tests/fixtures/ironwood/postnu63-quotient-one.bin",
+        1, program, sizeof program, "4b60b489fba78511e7852cdfb8cd499053d50db264e2e389bee82f12d23f9415"));
+    Q_CHECK(!gate_case("tests/fixtures/ironwood/postnu63-funded.bin", "tests/fixtures/ironwood/postnu63-quotient-two.bin",
+        2, program, sizeof program, "b6a266e4e45ca24645108adbdaba49e232a16542d4c6a2fe0635e2bb7c5de02a"));
+    return 0;
+}
+
 int test_ironwood_postnu63_quotient(void)
 {
     Q_CHECK(!quotient_case("tests/fixtures/ironwood/postnu63-quotient-one.bin", 1,
@@ -67,6 +154,7 @@ int test_ironwood_postnu63_quotient(void)
     Q_CHECK(!quotient_case("tests/fixtures/ironwood/postnu63-quotient-two.bin", 2,
                            "b6a266e4e45ca24645108adbdaba49e232a16542d4c6a2fe0635e2bb7c5de02a"));
     Q_CHECK(!quotient_refusals());
+    Q_CHECK(!gate_cases());
     puts("PostNu6_3 quotient public trace cases passed");
     return 0;
 }
