@@ -121,6 +121,29 @@ static bool start_replay(const struct block_index *parent)
     return slots && utxo_ironwood_history_begin(parent, slots, count, &replay).ok;
 }
 
+static enum utxo_ironwood_result resume_replay(const struct block_index *parent,
+    ironwood_history_reader_fn reader, const char *datadir, void *user)
+{
+    struct ironwood_history_cursor next;
+    struct ironwood_history_event event = {0};
+    if (replay.scanning && parent->nHeight == 0) {
+        if (!utxo_ironwood_history_step(&replay, reader, datadir, user, &next, &event).ok)
+            return UTXO_IRONWOOD_LOCAL_ERROR;
+        replay = next;
+    }
+    struct zcl_result step = utxo_ironwood_history_step(&replay, reader, datadir, user, &next, &event);
+    if (!step.ok) return step.code == UTXO_IRONWOOD_HISTORY_BODY_MISSING ?
+        UTXO_IRONWOOD_HISTORY_INCOMPLETE : UTXO_IRONWOOD_LOCAL_ERROR;
+    if (event.available && !matches_row(&event)) return UTXO_IRONWOOD_LOCAL_ERROR;
+    replay = next;
+    if (!next.complete) return UTXO_IRONWOOD_HISTORY_INCOMPLETE;
+    if (!event.available || event.height != parent->nHeight ||
+        !uint256_eq(&event.block_hash, parent->phashBlock)) return UTXO_IRONWOOD_LOCAL_ERROR;
+    verified = event;
+    end_replay();
+    return UTXO_IRONWOOD_OK;
+}
+
 static enum utxo_ironwood_result recover_parent(const struct block_index *parent,
     ironwood_history_reader_fn reader, const char *datadir, void *user)
 {
@@ -131,23 +154,7 @@ static enum utxo_ironwood_result recover_parent(const struct block_index *parent
     if (!slots || replay.parent != parent || !uint256_eq(&replay.parent_hash, parent->phashBlock)) {
         if (!start_replay(parent)) return UTXO_IRONWOOD_LOCAL_ERROR;
     }
-    struct ironwood_history_cursor next;
-    struct ironwood_history_event event = {0};
-    if (replay.scanning && parent->nHeight == 0) {
-        if (!utxo_ironwood_history_step(&replay, reader, datadir, user, &next, &event).ok)
-            return UTXO_IRONWOOD_HISTORY_INCOMPLETE;
-        replay = next;
-    }
-    struct zcl_result step = utxo_ironwood_history_step(&replay, reader, datadir, user, &next, &event);
-    if (!step.ok) return UTXO_IRONWOOD_HISTORY_INCOMPLETE;
-    if (event.available && !matches_row(&event)) return UTXO_IRONWOOD_LOCAL_ERROR;
-    replay = next;
-    if (!next.complete) return UTXO_IRONWOOD_HISTORY_INCOMPLETE;
-    if (!event.available || event.height != parent->nHeight ||
-        !uint256_eq(&event.block_hash, parent->phashBlock)) return UTXO_IRONWOOD_LOCAL_ERROR;
-    verified = event;
-    end_replay();
-    return UTXO_IRONWOOD_OK;
+    return resume_replay(parent, reader, datadir, user);
 }
 
 enum utxo_ironwood_result utxo_ironwood_session_prepare(struct sqlite3 *db,
