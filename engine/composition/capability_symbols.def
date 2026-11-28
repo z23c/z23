@@ -972,6 +972,7 @@ ZCL_CAPABILITY_SYMBOL("EC_GROUP_get_curve", CAP_HARMLESS, "Reads curve parameter
 ZCL_CAPABILITY_SYMBOL("EC_GROUP_new_curve_GFp", CAP_HARMLESS,
     "Constructs the explicit public prime-field group in memory.")
 ZCL_CAPABILITY_SYMBOL("EC_POINT_add", CAP_HARMLESS, "Adds two caller-supplied curve points.")
+ZCL_CAPABILITY_SYMBOL("EC_POINT_copy", CAP_HARMLESS, "Copies a caller-owned in-memory curve point.")
 ZCL_CAPABILITY_SYMBOL("EC_POINT_cmp", CAP_HARMLESS, "Compares caller-supplied in-memory curve points.")
 ZCL_CAPABILITY_SYMBOL("EC_POINT_free", CAP_HARMLESS, "Releases the in-memory point.")
 ZCL_CAPABILITY_SYMBOL("EC_POINT_get_affine_coordinates", CAP_HARMLESS, "Computes affine coordinates of a public point.")

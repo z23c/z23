@@ -1,0 +1,27 @@
+Public Sinsemilla MerkleCRH research parameters; this file does not authorize
+an anchor, release identity, or proof acceptance.
+
+sinsemilla-merkle-parameters.bin: 32800 bytes, SHA256
+c742f4c76e3727de7bc93bf446a50e9a84efa77a8987d96f409d6c464ed8262b
+Encoding is 1025 canonical compressed Pallas points: Q followed by S[0..1023].
+Q is Pallas hash_to_curve with personalization z.cash:SinsemillaQ and message
+z.cash:Orchard-MerkleCRH. Each S is the corresponding upstream SINSEMILLA_S
+point, encoded with the Pallas group encoding, in increasing array order.
+
+Upstream source versions and byte identities:
+  orchard 0.16.0 src/tree.rs SHA256
+    7602ebde6aeadac78d401131900a3ef06469bc27a7e2d69f68173220cc89d39b
+  sinsemilla 0.2.0 src/sinsemilla_s.rs SHA256
+    d536611a5e839e380f4eed2577c869900bea8e139a08416d466429185e9b3a7a
+  sinsemilla 0.2.0 src/lib.rs SHA256
+    19c7249bdde81663ad1baf40e6d1a37abdc5a7c7cca7b45f3654d2263d322dbf
+  research snapshot Cargo.lock SHA256
+    87f36c41a12da5a7430547c754aa52640ecfd52c939cf16fb0534e7f91b851cf
+
+The locally retained upstream-oracle generator has SHA256
+83e15569fea578b32ea9457467869aee42c0e95ebb4715fbeb4af513aa877868.
+It writes Q then each S using the upstream group encoding, and uses Orchard
+CommitmentTree with the first two commitments from the public H1-reward spend
+fixture to obtain the 0-, 1- and 2-leaf roots pinned in the registered test.
+The snapshot used to build it is not a Git checkout; its source hashes are
+recorded above rather than attributing it to an unverified commit.
