@@ -933,6 +933,7 @@ ZCL_CAPABILITY_SYMBOL("BN_CTX_free", CAP_HARMLESS, "Releases temporary integer s
 ZCL_CAPABILITY_SYMBOL("BN_CTX_get", CAP_HARMLESS, "Obtains a temporary integer from a caller-owned context.")
 ZCL_CAPABILITY_SYMBOL("BN_CTX_new", CAP_HARMLESS, "Allocates a context for in-memory integer arithmetic.")
 ZCL_CAPABILITY_SYMBOL("BN_CTX_start", CAP_HARMLESS, "Starts a temporary integer frame in a caller-owned context.")
+ZCL_CAPABILITY_SYMBOL("BN_cmp", CAP_HARMLESS, "Compares caller-owned integers.")
 ZCL_CAPABILITY_SYMBOL("BN_bn2lebinpad", CAP_HARMLESS, "Serializes an integer into the caller's little-endian buffer.")
 ZCL_CAPABILITY_SYMBOL("BN_free", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("BN_is_zero", CAP_HARMLESS, "Tests whether a caller-owned integer is zero.")
@@ -943,6 +944,7 @@ ZCL_CAPABILITY_SYMBOL("BN_mod_inverse", CAP_HARMLESS, "Computes a modular invers
 ZCL_CAPABILITY_SYMBOL("BN_mod_mul", CAP_HARMLESS, "Multiplies caller-supplied integers modulo a supplied modulus.")
 ZCL_CAPABILITY_SYMBOL("BN_mod_sqr", CAP_HARMLESS, "Squares a caller-supplied integer modulo a supplied modulus.")
 ZCL_CAPABILITY_SYMBOL("BN_mod_sub", CAP_HARMLESS, "Subtracts caller-supplied integers modulo a supplied modulus.")
+ZCL_CAPABILITY_SYMBOL("BN_nnmod", CAP_HARMLESS, "Reduces caller-supplied integers modulo a supplied modulus.")
 ZCL_CAPABILITY_SYMBOL("BN_new", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("BN_set_word", CAP_HARMLESS, "Sets an integer to the caller's machine word.")
 ZCL_CAPABILITY_SYMBOL("BN_to_ASN1_INTEGER", CAP_HARMLESS, "")
@@ -970,6 +972,7 @@ ZCL_CAPABILITY_SYMBOL("EC_GROUP_get_curve", CAP_HARMLESS, "Reads curve parameter
 ZCL_CAPABILITY_SYMBOL("EC_GROUP_new_curve_GFp", CAP_HARMLESS,
     "Constructs the explicit public prime-field group in memory.")
 ZCL_CAPABILITY_SYMBOL("EC_POINT_add", CAP_HARMLESS, "Adds two caller-supplied curve points.")
+ZCL_CAPABILITY_SYMBOL("EC_POINT_cmp", CAP_HARMLESS, "Compares caller-supplied in-memory curve points.")
 ZCL_CAPABILITY_SYMBOL("EC_POINT_free", CAP_HARMLESS, "Releases the in-memory point.")
 ZCL_CAPABILITY_SYMBOL("EC_POINT_get_affine_coordinates", CAP_HARMLESS, "Computes affine coordinates of a public point.")
 ZCL_CAPABILITY_SYMBOL("EC_POINT_is_at_infinity", CAP_HARMLESS, "Tests the identity element of an in-memory group.")

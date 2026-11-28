@@ -3715,3 +3715,5 @@ AGENT_IMPACT_RULE("core/modules/sapling/src/bn254.c|core/modules/sapling/src/bn2
 /* token-name-rules: the shared parity vector file is read by the explorer index test (ZSLP-VOUT0, ZNAM-OWNER-2). */
 AGENT_IMPACT_RULE("tests/fixtures/token_name_rules/*|tests/harness/src/test_explorer_index.c|contexts/explorer/models/src/explorer_index_overlays.c", "explorer_index make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_wallet_tx_matrix_regtest.c|tests/harness/include/test/regtest_node_fixture.h|tests/fixtures/z23wallet/regtest_shapes/*|tests/fixtures/z23wallet/regtest_shapes_legacy/*", "wallet_tx_matrix_regtest")
+
+AGENT_IMPACT_RULE("engine/services/include/services/ironwood_spend_auth.h|engine/services/src/ironwood_spend_auth.c|tests/harness/src/test_ironwood_spend_auth.c", "ironwood_spend_auth make_lint_gates")
