@@ -48,7 +48,7 @@ struct zcl_result ironwood_postnu63_first_challenge(
 {
     if (!view || !view->ironwood.proof.data || !vk || !basis || !w || !out)
         return ZCL_ERR(-1, "Missing PostNu6_3 framing input");
-    size_t expected;
+    size_t expected = 0;
     struct zcl_result result = ironwood_postnu63_proof_size(view->ironwood.count, &expected);
     if (!result.ok) return result;
     if (view->ironwood.proof.size != expected) return ZCL_ERR(-1, "Noncanonical PostNu6_3 proof length");

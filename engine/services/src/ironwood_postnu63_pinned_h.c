@@ -50,7 +50,7 @@ static struct zcl_result pinned_stage_size(const struct ironwood_postnu63_stage 
         !stage->proof.buffer || stage->proof.error != ZCL_CODEC_OK ||
         !stage->actions || stage->actions > (SIZE_MAX - PROGRAM_SIZE) / TERMS_PER_ACTION)
         return ZCL_ERR(-1, "Invalid pinned constraint stage");
-    size_t proof_size;
+    size_t proof_size = 0;
     struct zcl_result r = ironwood_postnu63_proof_size(stage->actions, &proof_size);
     if (!r.ok) return r;
     if (stage->proof.length != proof_size || stage->proof.position != proof_size - 992)

@@ -119,7 +119,7 @@ static void action_query(size_t n, size_t a, size_t row, struct ironwood_opening
 struct zcl_result ironwood_postnu63_query_at(uint64_t actions, size_t ordinal,
                                              struct ironwood_opening_query *out)
 {
-    size_t bytes;
+    size_t bytes = 0;
     struct zcl_result r = ironwood_postnu63_proof_size(actions, &bytes);
     if (!r.ok) return r;
     size_t n = (size_t)actions;
