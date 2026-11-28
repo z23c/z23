@@ -853,13 +853,10 @@ static bool mirror_rebuild_left_unchanged(int64_t code)
            code == UTXO_MIRROR_REBUILD_OVERLAY_ACTIVE;
 }
 
-static bool mirror_rebuild_restore_health(struct mirror_rebuild_ctx *r)
+static void mirror_rebuild_restore_health(struct mirror_rebuild_ctx *r)
 {
-    if (!mirror_rebuild_left_unchanged(r->written))
-        return false;
     atomic_store(&r->svc->mirror_health, r->prior_quarantine
                  ? UTXO_MIRROR_QUARANTINED : UTXO_MIRROR_HEALTHY);
-    return true;
 }
 
 static void mirror_rebuild_mark_auditing(struct mirror_rebuild_ctx *r)
@@ -915,8 +912,10 @@ static bool mirror_rebuild_and_advance_lane(struct node_db *ndb, void *ctx)
     r->written = mirror_rebuild_from_coins_kv(ndb, &snap_h,
                                               &r->svc->stop_requested, r->operator_repair,
                                               r->reason, sizeof(r->reason));
-    if (mirror_rebuild_restore_health(r))
+    if (mirror_rebuild_left_unchanged(r->written)) {
+        mirror_rebuild_restore_health(r);
         return false;
+    }
     if (r->written < 0) {
         if (!r->prior_quarantine && (r->cause_snapshot & UINT64_C(3)) == UTXO_MIRROR_CAUSE_UNKNOWN)
             mirror_cause_if_unchanged(r, UTXO_MIRROR_CAUSE_REBUILD_ERROR);
