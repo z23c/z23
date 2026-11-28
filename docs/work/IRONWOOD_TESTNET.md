@@ -58,6 +58,8 @@ Miners on the private research network continue mining with Equihash (48,5). Slo
 
 Before choosing a deployment schedule, verify the 200,000/200,001-byte boundary with mined blocks, spend a mature protected mining reward, confirm withdrawals during the freeze and replay a fork that changes the decisive vote.
 
+The selected release history is a fresh private chain under one reviewed consensus schedule, with a separate release identity and data directory. Preserve the existing rehearsal history. Before voting, verify a clean sync from genesis through height 28, and ensure a protected mining reward has matured and Sapling notes are funded. The schedule and voting heights remain pending verification.
+
 ## Example ballot round
 
 The [signaling catalog](MINER_SIGNALING.md) uses the raw genesis hash and a separate fork ID. For this example use SHA3-256 of ASCII `Z23/Ironwood/testnet/experimental-round/v1` without a terminator. The fork ID is `0470426015683b2d25ae8014a684975fa4841720b848c22457ee8f510a1ab718`. Hash the exact proposal file bytes at revision `223f48c5fb361f2a0024909fc75cb557bd1c7e37` with SHA3-256 for the two rule revisions below.
