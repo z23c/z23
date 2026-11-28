@@ -15,7 +15,9 @@
  * runs: a row travels as the verbatim text of a FLEET-scope note signed by
  * the sending box's node key, and the receiving box admits it only after
  * its own node confirms that exact post, text and signer, and after its
- * owner granted that sender's label to that enrolled box.
+ * owner granted that sender's label to that enrolled box when the row is a
+ * directive. Broadcast presence needs the same signed roster evidence but
+ * no work grant, and remains passive note mail rather than directive intake.
  *
  * NAMES. A box's receiver name IS its fleet roster name (`fleet machines`).
  * A row's `to` naming another roster box is what makes the row remote.
@@ -26,9 +28,10 @@
  * when its ref names a directive this box imported from a peer (so the
  * receiver's accept, its refusals and the worker's result, addressed to the
  * sender's label or to "*", travel back). Every other row is local mail and
- * never leaves the box: the design note said "every row not addressed to
- * this receiver", but that would publish all local-only mail to every
- * paired box and spend the 60-posts-per-10-minutes key quota on it.
+ * never leaves the box, except a broadcast note under presence-<role> whose
+ * body starts presence.v1;. That passive liveness note has one unhinted
+ * fleet post, not one post per peer. Ordinary broadcast and alias mail stays
+ * local rather than publishing every local conversation to every paired box.
  * The post is kind note, scope fleet, text = the row line exactly,
  * receipt "z23.mail.v1", ttl BM_TTL_S, and created_at = the row's own ts,
  * so a re-export after a crash signs the same bytes and is the same post id
@@ -50,12 +53,15 @@
  * IMPORT (before intake). The node's `fleet_page` op: fleet posts in its
  * store's own arrival order after a cursor, under a per-process epoch (a new
  * epoch restarts at 0). A post is kept only when it is a z23.mail.v1 note,
- * its host is the signer of an enrolled box P other than this one, its text
- * is a well-formed row, and either the row's `to` is this receiver (then
- * "in <ref> P" is recorded) or its ref is one this box exported to P. It is
- * appended to <state>/mail/inbox.P.jsonl as the original row plus
- * "board_post":"<id>","board_signer":"<host hex>", unless a complete valid
- * line already carries that original row and carrier fields (the same post
+ * its complete signed post verifies BEFORE its text is parsed, its host is
+ * the signer of an enrolled box P other than this one, its text is a
+ * well-formed row, and either the row's `to` is this receiver (then its ref
+ * is recorded), it is a broadcast presence.v1 note, or its ref is one this
+ * box exported to P.
+ * Addressed mail records "in <ref> P". Kept rows are appended to
+ * <state>/mail/inbox.P.jsonl as the original row plus "board_post":"<id>",
+ * "board_signer":"<host hex>", unless a complete valid line already carries
+ * that original row and carrier fields (the same post
  * re-gossiped, or a twin post of the same row). The match is on the whole
  * row, never on the post id alone: a line that merely NAMES a post id must
  * not stop the genuine row from arriving. Dedupe and append hold the inbox
@@ -79,6 +85,9 @@
  *   5. a live peer grant carries the row's `from` with the send scope for
  *      that box (zcl_fleet_steer_grant_peer_live, else
  *      RECEIVE_PEER_UNGRANTED).
+ * Presence notes never enter this directive admission path: their import
+ * requires the enrolled-box signature described above, but no work grant.
+ *
  * sender_binding is not consulted on this path: only the sending box can
  * recompute it. A peer grant never admits an unsigned row, and a local
  * grant never admits a board row (see native_fleet.h).
@@ -112,6 +121,7 @@
 #include "platform/rng.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
+#include "session/fleet_board_proto.h"
 #include "util/log_macros.h"
 
 #include <ctype.h>
@@ -244,6 +254,13 @@ static bool bm_row_from(const struct json_value *o, struct bm_row *r)
     r->ref = bm_str(o, "ref");
     r->sender_binding = bm_str(o, "sender_binding");
     return r->ts[0] && r->to[0] && r->kind[0];
+}
+
+static bool bm_presence_row(const struct bm_row *r)
+{
+    return strcmp(r->to, "*") == 0 && strcmp(r->kind, "note") == 0 &&
+           strncmp(r->ref, "presence-", 9) == 0 && r->ref[9] &&
+           strncmp(r->body, "presence.v1;", 12) == 0;
 }
 
 /* ── the roster: which enrolled box signs with which node key ──────────── */
@@ -982,17 +999,24 @@ static bool bm_export_line(const struct zcl_boardmail_ctx *c,
 {
     struct json_value v;
     struct bm_row r;
-    const char *peer;
+    const char *peer = NULL;
     char push_to[BM_HEX + 1];
-    bool record = false, advance = true;
+    bool record = false, advance = true, presence;
     json_init(&v);
-    if (!json_read(&v, line, strlen(line)) || !bm_row_from(&v, &r) ||
-        !(peer = bm_export_peer(c, ro, refs, &r, &record))) {
+    if (!json_read(&v, line, strlen(line)) || !bm_row_from(&v, &r)) {
+        json_free(&v);
+        return true;
+    }
+    presence = bm_presence_row(&r);
+    if (!presence)
+        peer = bm_export_peer(c, ro, refs, &r, &record);
+    if (!presence && !peer) {
         json_free(&v);
         return true;
     }
     switch (bm_post_row(line, &r, (long long)platform_time_wall_time_t(),
-                        bm_push_to(ro, peer, push_to), export_offset)) {
+                        presence ? NULL : bm_push_to(ro, peer, push_to),
+                        export_offset)) {
     case BM_POST_DONE:
         st->board_out++;
         if (record)
@@ -1516,18 +1540,51 @@ static const struct bm_peer *bm_import_peer(const struct zcl_boardmail_ctx *c,
     return (p && strcmp(p->name, c->receiver) != 0) ? p : NULL;
 }
 
+static bool bm_mail_post_verify(const struct json_value *post,
+                                    const char *text)
+{
+    struct fleet_board_post p;
+    long long created = bm_int(post, "created_at", -1);
+    long long ttl = bm_int(post, "ttl", -1);
+    size_t text_len = strlen(text);
+    memset(&p, 0, sizeof(p));
+    if (created < 0 || ttl < 0 || (unsigned long long)ttl > UINT32_MAX ||
+        text_len > FLEET_BOARD_TEXT_MAX ||
+        strlen(bm_str(post, "agent")) > FLEET_BOARD_AGENT_MAX ||
+        strlen(bm_str(post, "receipt")) > FLEET_BOARD_RECEIPT_MAX ||
+        !zcl_hex_decode_lower(bm_str(post, "id"), p.id, sizeof(p.id)) ||
+        !zcl_hex_decode_lower(bm_str(post, "ref"), p.ref, sizeof(p.ref)) ||
+        !zcl_hex_decode_lower(bm_str(post, "host"), p.host_pubkey,
+                              sizeof(p.host_pubkey)) ||
+        !zcl_hex_decode_lower(bm_str(post, "signature"), p.signature,
+                              sizeof(p.signature)))
+        return false;
+    p.kind = FLEET_BOARD_KIND_NOTE;
+    p.scope = FLEET_BOARD_SCOPE_FLEET;
+    p.created_at = (uint64_t)created;
+    p.ttl = (uint32_t)ttl;
+    p.text_len = (uint32_t)text_len;
+    memcpy(p.text, text, text_len + 1);
+    (void)snprintf(p.agent, sizeof(p.agent), "%s", bm_str(post, "agent"));
+    (void)snprintf(p.receipt, sizeof(p.receipt), "%s", bm_str(post, "receipt"));
+    return fleet_board_post_verify(&p) == FLEET_BOARD_OK;
+}
+
 static bool bm_import_post(const struct zcl_boardmail_ctx *c,
                            const struct bm_roster *ro, struct bm_refs *refs,
                            const struct json_value *post,
                            struct rcv_beat_stats *st)
 {
-    const struct bm_peer *p = bm_import_peer(c, ro, post);
     const char *text = bm_str(post, "text"), *id = bm_str(post, "id");
+    const struct bm_peer *p;
+    if (!bm_mail_post_verify(post, text))
+        return true;
+    p = bm_import_peer(c, ro, post);
     char path[BM_PATH_CAP];
     struct json_value v;
     struct bm_row r;
     enum bm_inbox_result stored = BM_INBOX_PRESENT;
-    bool mine;
+    bool mine, presence;
     if (!p || !bm_hex64(id))
         return true;
     json_init(&v);
@@ -1536,7 +1593,8 @@ static bool bm_import_post(const struct zcl_boardmail_ctx *c,
         return true;
     }
     mine = strcmp(r.to, c->receiver) == 0;
-    if (mine || bm_refs_has(refs, 'o', r.ref, p->name)) {
+    presence = bm_presence_row(&r);
+    if (mine || presence || bm_refs_has(refs, 'o', r.ref, p->name)) {
         (void)snprintf(path, sizeof(path), "%s/inbox.%s.jsonl", c->maildir,
                        p->name);
         if (mine && zcl_devagent_name_ok(r.ref) &&

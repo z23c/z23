@@ -41,6 +41,9 @@ bool zcl_presence_rec_store(const char *role,
 void zcl_presence_emit(const struct zcl_command_request *req,
                        struct zcl_command_reply *reply,
                        const struct zcl_presence_in *in);
+void zcl_presence_emit_receiver(const struct zcl_command_request *req,
+                                struct zcl_command_reply *reply,
+                                const char *receiver);
 void zcl_presence_reply_skipped(struct zcl_command_reply *reply,
                                 const char *role, const char *why);
 void zcl_presence_fail(struct zcl_command_reply *reply, const char *code,

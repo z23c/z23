@@ -219,6 +219,31 @@ static bool bmx_verified_result(const struct bmx_post *p)
     return fleet_board_post_verify(&wire) != FLEET_BOARD_OK;
 }
 
+static bool bmx_verified_presence(const struct bmx_post *p, int host)
+{
+    struct fleet_board_post wire;
+    struct json_value row;
+    uint8_t computed[32];
+    bool ok;
+    if (!p || strcmp(p->host, g_bmx_host[host]) || !bmx_post_wire(p, &wire) ||
+        fleet_board_post_compute_id(&wire, computed) != FLEET_BOARD_OK ||
+        memcmp(computed, wire.id, sizeof(computed)) != 0 ||
+        fleet_board_post_verify(&wire) != FLEET_BOARD_OK)
+        return false;
+    json_init(&row);
+    ok = json_read(&row, p->text, strlen(p->text)) &&
+         !strcmp(json_get_str(json_get(&row, "to")), "*") &&
+         !strcmp(json_get_str(json_get(&row, "kind")), "note") &&
+         !strncmp(json_get_str(json_get(&row, "ref")), "presence-", 9) &&
+         !strncmp(json_get_str(json_get(&row, "body")), "presence.v1;", 12) &&
+         !strstr(p->text, g_bmx_base) && !strstr(p->text, g_bmx_ws);
+    json_free(&row);
+    if (!ok)
+        return false;
+    wire.text[0] ^= 1;
+    return fleet_board_post_verify(&wire) != FLEET_BOARD_OK;
+}
+
 static struct bmx_post *bmx_find(struct bmx_node *n, const char *id)
 {
     for (size_t i = 0; i < n->n; i++) {
@@ -283,12 +308,17 @@ static long long bmx_signed_by(int node, int host)
 
 static void bmx_render(struct json_value *o, const struct bmx_post *p)
 {
+    char signature[129];
     (void)json_push_kv_str(o, "id", p->id);
     (void)json_push_kv_str(o, "kind", "note");
     (void)json_push_kv_int(o, "created_at", p->created);
     (void)json_push_kv_int(o, "ttl", p->ttl);
     (void)json_push_kv_int(o, "expires_at", p->created + p->ttl);
+    (void)json_push_kv_str(o, "ref",
+        "0000000000000000000000000000000000000000000000000000000000000000");
     (void)json_push_kv_str(o, "host", p->host);
+    zcl_hex_encode(p->signature, sizeof(p->signature), signature);
+    (void)json_push_kv_str(o, "signature", signature);
     (void)json_push_kv_str(o, "agent", p->agent);
     (void)json_push_kv_str(o, "scope", "fleet");
     (void)json_push_kv_str(o, "text", p->text);
@@ -864,6 +894,216 @@ static void bmx_teardown(void)
     else
         unsetenv("XDG_STATE_HOME");
 }
+static int bmx_t_presence(void)
+{
+    int failures = 0;
+    TEST("boardmail: signed broadcast presence crosses boxes once without intake") {
+        struct rcv_beat_stats st;
+        struct json_value row;
+        char ref[80], evidence[160];
+        ASSERT(bmx_setup("presence"));
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        ASSERT_EQ(st.board_out, 1);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 1);
+        ASSERT_EQ(g_bmx_node[BMX_A].post_calls, 1u);
+        ASSERT(bmx_verified_presence(&g_bmx_node[BMX_A].p[0], BMX_A));
+        ASSERT_STR_EQ(g_bmx_node[BMX_A].p[0].push_to, "-");
+        json_init(&row);
+        ASSERT(json_read(&row, g_bmx_node[BMX_A].p[0].text,
+                         strlen(g_bmx_node[BMX_A].p[0].text)));
+        (void)snprintf(ref, sizeof(ref), "%s",
+                       json_get_str(json_get(&row, "ref")));
+        json_free(&row);
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        ASSERT_EQ(st.board_out, 0);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 1);
+        ASSERT_EQ(g_bmx_node[BMX_A].post_calls, 1u);
+        bmx_carry(BMX_A, BMX_B);
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.board_in, 1);
+        ASSERT_EQ(st.board_out, 1);
+        ASSERT_EQ(st.seen, 0);
+        ASSERT_EQ(st.admitted, 0);
+        ASSERT_EQ(st.refused, 0);
+        ASSERT_EQ(bmx_queued(ref), 0);
+        (void)snprintf(evidence, sizeof(evidence), "\"board_post\":\"%s\"",
+                       g_bmx_node[BMX_A].p[0].id);
+        ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", ref,
+                            "presence.v1;"), 1);
+        ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", ref,
+                            evidence), 1);
+        (void)snprintf(evidence, sizeof(evidence), "\"board_signer\":\"%s\"",
+                       g_bmx_host[BMX_A]);
+        ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", ref,
+                            evidence), 1);
+        ASSERT_EQ(bmx_lines(BMX_B, "mail/outbox.jsonl", ref,
+                            "state=accepted"), 0);
+        ASSERT_EQ((long long)g_bmx_node[BMX_B].n, 2);
+        ASSERT(bmx_verified_presence(&g_bmx_node[BMX_B].p[1], BMX_B));
+        bmx_carry(BMX_B, BMX_A);
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        ASSERT_EQ(st.board_in, 1);
+        ASSERT_EQ(st.board_out, 0);
+        ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl",
+                            "presence.v1;", "board_signer"), 1);
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.board_in, 0);
+        ASSERT_EQ(st.board_out, 0);
+        ASSERT_EQ((long long)g_bmx_node[BMX_B].n, 2);
+        bmx_teardown();
+        PASS();
+    }
+_test_next:;
+    bmx_teardown();
+    return failures;
+}
+
+static bool bmx_presence_ref(const char *text, char *out, size_t cap)
+{
+    struct json_value row;
+    json_init(&row);
+    bool ok = json_read(&row, text, strlen(text));
+    const char *ref = ok ? json_get_str(json_get(&row, "ref")) : NULL;
+    ok = ref && !strncmp(ref, "presence-", 9) && strlen(ref) < cap;
+    if (ok)
+        (void)snprintf(out, cap, "%s", ref);
+    json_free(&row);
+    return ok;
+}
+
+static void bmx_row(char *out, size_t cap, const char *ts, const char *ref,
+                    const char *prompt);
+static void bmx_ts(long long unix_s, char *out, size_t cap);
+
+static bool bmx_text_replace(struct bmx_post *p, const char *from,
+                             const char *to)
+{
+    char *at = strstr(p->text, from);
+    char edited[BMX_TEXT];
+    if (!at)
+        return false;
+    int n = snprintf(edited, sizeof(edited), "%.*s%s%s",
+                     (int)(at - p->text), p->text, to, at + strlen(from));
+    return n > 0 && (size_t)n < sizeof(edited) &&
+           (size_t)n < sizeof(p->text) &&
+           snprintf(p->text, sizeof(p->text), "%s", edited) == n;
+}
+
+static bool bmx_out_ref(const char *ref)
+{
+    char dir[1600], line[160];
+    (void)snprintf(dir, sizeof(dir), "%s/z23/dev/receive", g_bmx_state[BMX_B]);
+    if (mkdir(dir, 0700) != 0 && errno != EEXIST)
+        return false;
+    (void)snprintf(line, sizeof(line), "out %s node-a\n", ref);
+    return bmx_write(BMX_B, "receive/boardmail.refs", line, "ab");
+}
+
+static int bmx_t_tampered_mail(void)
+{
+    int failures = 0;
+    TEST("boardmail: every altered signed mail post is rejected before routing") {
+        static const char *const names[] = {"to", "kind", "ref", "prefix",
+                                            "directive"};
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+            struct rcv_beat_stats st;
+            struct fleet_board_post wire;
+            struct bmx_post *p;
+            char ref[80], original[80], tag[64], stamp[32], forged[4096];
+            (void)snprintf(tag, sizeof(tag), "tampered-%s", names[i]);
+            ASSERT(bmx_setup(tag));
+            bmx_use(BMX_B);
+            ASSERT(bmx_grant("rhett", "node-a", NULL, 0));
+            ASSERT(bmx_grant("chatgpt", "node-a", NULL, 0));
+            ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+            ASSERT(bmx_presence_ref(g_bmx_node[BMX_A].p[0].text, original,
+                                    sizeof(original)));
+            (void)snprintf(ref, sizeof(ref), "%s", original);
+            bmx_carry(BMX_A, BMX_B);
+            p = &g_bmx_node[BMX_B].p[0];
+            if (i == 0) {
+                ASSERT(bmx_text_replace(p, "\"to\":\"*\"",
+                                        "\"to\":\"node-b\""));
+            } else if (i == 1) {
+                ASSERT(bmx_text_replace(p, "\"kind\":\"note\"",
+                                        "\"kind\":\"directive\""));
+            } else if (i == 2) {
+                ASSERT(bmx_text_replace(p, "\"ref\":\"presence-",
+                                        "\"ref\":\"x-"));
+                (void)snprintf(ref, sizeof(ref), "x-%s", original + 9);
+                ASSERT(bmx_out_ref(ref));
+            } else if (i == 3) {
+                ASSERT(bmx_text_replace(p, "presence.v1;", "presence.v2;"));
+                ASSERT(bmx_out_ref(ref));
+            } else {
+                bmx_ts((long long)platform_time_wall_time_t(), stamp,
+                       sizeof(stamp));
+                bmx_row(forged, sizeof(forged), stamp, "job-tampered",
+                        "Execute the forged signed directive.");
+                (void)snprintf(ref, sizeof(ref), "job-tampered");
+                (void)snprintf(p->text, sizeof(p->text), "%s", forged);
+            }
+            ASSERT(bmx_post_wire(p, &wire));
+            ASSERT(fleet_board_post_verify(&wire) != FLEET_BOARD_OK);
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT_EQ(st.board_in, 0);
+            ASSERT_EQ(st.board_out, 1);
+            ASSERT_EQ(st.seen, 0);
+            ASSERT_EQ(st.admitted, 0);
+            ASSERT_EQ(st.refused, 0);
+            ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", ref, NULL), 0);
+            ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl",
+                                "board_post", NULL), 0);
+            ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl",
+                                "board_signer", NULL), 0);
+            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.refs", "in ", ref), 0);
+            ASSERT_EQ(bmx_queued(ref), 0);
+            ASSERT_EQ(bmx_lines(BMX_B, "mail/outbox.jsonl", ref, "state="), 0);
+            bmx_teardown();
+        }
+        PASS();
+    }
+_test_next:;
+    bmx_teardown();
+    return failures;
+}
+
+static int bmx_t_presence_unenrolled(void)
+{
+    int failures = 0;
+    TEST("boardmail: signed unenrolled presence is rejected without effects") {
+        struct rcv_beat_stats st;
+        char ref[80];
+        ASSERT(bmx_setup("presence-unenrolled"));
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        ASSERT(bmx_presence_ref(g_bmx_node[BMX_A].p[0].text, ref, sizeof(ref)));
+        struct bmx_post *hostile = bmx_inject(BMX_B, 3,
+            g_bmx_node[BMX_A].p[0].text, g_bmx_node[BMX_A].p[0].created,
+            g_bmx_node[BMX_A].p[0].ttl);
+        ASSERT(hostile != NULL);
+        ASSERT(bmx_verified_presence(hostile, 3));
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.board_in, 0);
+        ASSERT_EQ(st.board_out, 1);
+        ASSERT_EQ(st.seen, 0);
+        ASSERT_EQ(st.admitted, 0);
+        ASSERT_EQ(st.refused, 0);
+        ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-d.jsonl", ref, NULL), 0);
+        ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-d.jsonl",
+                            "board_post", NULL), 0);
+        ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-d.jsonl",
+                            "board_signer", NULL), 0);
+        ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.refs",
+                            "presence-", NULL), 0);
+        ASSERT_EQ(bmx_queued(ref), 0);
+        ASSERT_EQ(bmx_lines(BMX_B, "mail/outbox.jsonl", ref, "state="), 0);
+        bmx_teardown();
+        PASS();
+    }
+_test_next:;
+    bmx_teardown();
+    return failures;
+}
 
 /* A sends `ref` to node-b as chatgpt, B has granted chatgpt to node-a,
  * and A's receiver has put the row on A's board. */
@@ -871,6 +1111,7 @@ static bool bmx_sent(const char *ref)
 {
     char grant[64], error[64];
     struct rcv_beat_stats st;
+    long long expected = g_bmx_node[BMX_A].n ? 1 : 2;
     bmx_use(BMX_A);
     if (!bmx_grant("chatgpt", NULL, grant, sizeof(grant)) ||
         !bmx_send(grant, "node-b", ref, g_bmx_body, error, sizeof(error)))
@@ -878,7 +1119,7 @@ static bool bmx_sent(const char *ref)
     bmx_use(BMX_B);
     if (!bmx_grant("chatgpt", "node-a", NULL, 0))
         return false;
-    return bmx_drive(BMX_A, &st) == 1 && st.board_out == 1;
+    return bmx_drive(BMX_A, &st) == 1 && st.board_out == expected;
 }
 
 static bool bmx_sent_unbound(const char *ref)
@@ -890,7 +1131,7 @@ static bool bmx_sent_unbound(const char *ref)
     bmx_use(BMX_B);
     if (!bmx_grant("chatgpt", "node-a", NULL, 0))
         return false;
-    return bmx_drive(BMX_A, &st) == 1 && st.board_out == 1;
+    return bmx_drive(BMX_A, &st) == 1 && st.board_out == 2;
 }
 
 /* One row line as A's outbox wrote it for `ref` (the carried text). */
@@ -965,32 +1206,32 @@ static int bmx_t_round_trip(void)
         ASSERT(bmx_setup("round-trip"));
         ASSERT(bmx_sent("job-1"));
         /* The directive is on A's board, signed by A's node key. */
-        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 1);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 2);
         ASSERT_STR_EQ(g_bmx_node[BMX_A].p[0].host, g_bmx_host[BMX_A]);
         bmx_carry(BMX_A, BMX_B);
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
-        ASSERT_EQ(st.board_in, 1);
+        ASSERT_EQ(st.board_in, 2);
         ASSERT_EQ(st.admitted, 1);
         ASSERT_EQ(st.refused, 0);
         ASSERT_EQ(bmx_queued("job-1"), 1);
         ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "\"job-1\"",
                             "\"board_signer\""), 1);
         /* The accept went back onto B's board under the same ref. */
-        ASSERT_EQ(st.board_out, 1);
+        ASSERT_EQ(st.board_out, 2);
         /* A modeled worker result, posted to everyone. */
         ASSERT(bmx_mail("node-b", "*", "result", "job-1",
                         "worker=node-b\nstate=done\nverdict=pass\n"));
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
         ASSERT_EQ(st.board_out, 1);
-        ASSERT_EQ((long long)g_bmx_node[BMX_B].n, 3);
+        ASSERT_EQ((long long)g_bmx_node[BMX_B].n, 5);
         (void)snprintf(ack_post, sizeof(ack_post), "\"board_post\":\"%s\"",
-                       g_bmx_node[BMX_B].p[1].id);
-        (void)snprintf(result_post, sizeof(result_post), "\"board_post\":\"%s\"",
                        g_bmx_node[BMX_B].p[2].id);
+        (void)snprintf(result_post, sizeof(result_post), "\"board_post\":\"%s\"",
+                       g_bmx_node[BMX_B].p[4].id);
         ASSERT(strcmp(ack_post, result_post) != 0);
         bmx_carry(BMX_B, BMX_A);
         ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
-        ASSERT_EQ(st.board_in, 2);
+        ASSERT_EQ(st.board_in, 3);
         ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl",
                             "state=accepted", "\"job-1\""), 1);
         ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", "state=done",
@@ -1010,11 +1251,11 @@ static int bmx_t_round_trip(void)
         ASSERT(bmx_post_wire(&counterfeit, &counterfeit_wire));
         ASSERT_EQ(fleet_board_post_verify(&counterfeit_wire), FLEET_BOARD_OK);
         ASSERT(!bmx_verified_result(&counterfeit));
-        /* Nothing local-only is left: A signed one post, B two, and
-         * carriage left the same three on both nodes. */
-        ASSERT_EQ(bmx_signed_by(BMX_A, BMX_A), 1);
-        ASSERT_EQ(bmx_signed_by(BMX_A, BMX_B), 2);
-        ASSERT_EQ((long long)g_bmx_node[BMX_B].n, 3);
+        /* Nothing local-only is left: A signed two posts, B three, and
+         * carriage left the same five on both nodes. */
+        ASSERT_EQ(bmx_signed_by(BMX_A, BMX_A), 2);
+        ASSERT_EQ(bmx_signed_by(BMX_A, BMX_B), 3);
+        ASSERT_EQ((long long)g_bmx_node[BMX_B].n, 5);
         ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", ack_post,
                             "state=accepted"), 1);
         ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", result_post,
@@ -1025,9 +1266,9 @@ static int bmx_t_round_trip(void)
         bmx_carry(BMX_B, BMX_A);
         memset(&g_bmx_replay, 0, sizeof(g_bmx_replay));
         (void)snprintf(g_bmx_replay.ack, sizeof(g_bmx_replay.ack), "%s",
-                       g_bmx_node[BMX_B].p[1].id);
-        (void)snprintf(g_bmx_replay.result, sizeof(g_bmx_replay.result), "%s",
                        g_bmx_node[BMX_B].p[2].id);
+        (void)snprintf(g_bmx_replay.result, sizeof(g_bmx_replay.result), "%s",
+                       g_bmx_node[BMX_B].p[4].id);
         g_bmx_replay.enabled = true;
         bmx_forget(BMX_A, "receive/boardmail.state");
         ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
@@ -1060,7 +1301,7 @@ static int bmx_t_unbound_operator(void)
         ASSERT(bmx_sent_unbound("job-unbound"));
         bmx_carry(BMX_A, BMX_B);
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
-        ASSERT_EQ(st.board_in, 1);
+        ASSERT_EQ(st.board_in, 2);
         ASSERT_EQ(st.admitted, 1);
         ASSERT_EQ(st.refused, 0);
         ASSERT_EQ(bmx_queued("job-unbound"), 1);
@@ -1068,7 +1309,7 @@ static int bmx_t_unbound_operator(void)
                             "sender_binding=\n", NULL), 1);
         ASSERT_EQ(bmx_lines(BMX_B, "receive/brief/job-unbound.evidence",
                             "board_signer=", NULL), 1);
-        ASSERT_EQ(st.board_out, 1);
+        ASSERT_EQ(st.board_out, 2);
         bmx_teardown();
         PASS();
     }
@@ -1088,7 +1329,7 @@ static int bmx_t_regossip(void)
         ASSERT(bmx_sent("job-2"));
         bmx_carry(BMX_A, BMX_B);
         bmx_carry(BMX_A, BMX_B);
-        ASSERT_EQ((long long)g_bmx_node[BMX_B].n, 1);
+        ASSERT_EQ((long long)g_bmx_node[BMX_B].n, 2);
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
         ASSERT_EQ(st.admitted, 1);
         /* The node restarted: a new epoch sends the reader back to 0. */
@@ -1158,8 +1399,8 @@ static int bmx_t_crash_between(void)
         /* A died before recording the export: same bytes, same post. */
         bmx_forget(BMX_A, "receive/boardmail.state");
         ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
-        ASSERT_EQ(st.board_out, 1);
-        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 1);
+        ASSERT_EQ(st.board_out, 2);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 2);
         bmx_carry(BMX_A, BMX_B);
         ASSERT(bmx_interrupt_import());
         bmx_use(BMX_B);
@@ -1168,7 +1409,7 @@ static int bmx_t_crash_between(void)
         ASSERT_EQ(bmx_lines(BMX_B, "mail/outbox.jsonl", "state=accepted", "\"job-3\""), 0);
         /* Recover the already synced row and finish admission once. */
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
-        ASSERT_EQ(st.board_in, 0);
+        ASSERT_EQ(st.board_in, 1);
         ASSERT_EQ(st.admitted, 1);
         /* Lose both cursors after admission and read the same page again. */
         bmx_forget(BMX_B, "receive/boardmail.state");
@@ -1315,8 +1556,8 @@ static int bmx_t_expired(void)
         ASSERT(bmx_mail("node-a", "node-a", "note", "prime", "prime"));
         ASSERT(bmx_write(BMX_A, "mail/outbox.jsonl", line, "ab"));
         ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
-        ASSERT_EQ(st.board_out, 0);
-        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 0);
+        ASSERT_EQ(st.board_out, 1);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 1);
         /* A post that expired on the way is never paged to B. */
         bmx_ts(now - 7200, ts, sizeof(ts));
         bmx_row(row, sizeof(row), ts, "job-7b", "Expired in flight.");
@@ -1353,7 +1594,7 @@ static int bmx_t_deferred(void)
         bmx_carry(BMX_A, BMX_B);
         g_bmx_node[BMX_B].show_down = true;
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
-        ASSERT_EQ(st.board_in, 1);
+        ASSERT_EQ(st.board_in, 2);
         ASSERT(st.board_deferred >= 1);
         ASSERT_EQ(st.admitted + st.refused, 0);
         ASSERT_EQ(bmx_queued("job-8"), 0);
@@ -1866,15 +2107,15 @@ static int bmx_t_refs_wrap(void)
         ASSERT(bmx_mail("node-a", "*", "result", "choice", "first\n"));
         ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
         ASSERT_EQ(st.board_out, 1);
-        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 1);
-        ASSERT_STR_EQ(g_bmx_node[BMX_A].p[0].push_to, g_bmx_host[BMX_B]);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 2);
+        ASSERT_STR_EQ(g_bmx_node[BMX_A].p[1].push_to, g_bmx_host[BMX_B]);
         /* Another wrap evicts the first match; reload must keep the next. */
         ASSERT(bmx_advance_refs());
         ASSERT(bmx_mail("node-a", "*", "result", "choice", "second\n"));
         ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
         ASSERT_EQ(st.board_out, 1);
-        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 2);
-        ASSERT_STR_EQ(g_bmx_node[BMX_A].p[1].push_to, g_bmx_host[2]);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 3);
+        ASSERT_STR_EQ(g_bmx_node[BMX_A].p[2].push_to, g_bmx_host[2]);
         bmx_teardown(); PASS();
     }
 _test_next:;
@@ -1886,23 +2127,23 @@ static int bmx_t_push_hint(void)
     int failures = 0;
     TEST("boardmail: a box-addressed row and every answer to an imported "
          "directive name their box's board key as the push hint; alias and "
-         "broadcast rows are still not exported") {
+         "ordinary broadcast rows stay local; presence is unhinted") {
         struct rcv_beat_stats st;
         ASSERT(bmx_setup("push-hint"));
         /* A's directive to node-b: hinted to node-b's board key. */
         ASSERT(bmx_sent("job-h"));
-        ASSERT_EQ(bmx_signed_by(BMX_A, BMX_A), 1);
+        ASSERT_EQ(bmx_signed_by(BMX_A, BMX_A), 2);
         ASSERT_EQ(bmx_hinted(BMX_A, BMX_A, g_bmx_host[BMX_B]), 1);
         /* B's accept, and the worker's result posted to everyone, answer
          * the directive A sent: both hinted back to node-a. */
         bmx_carry(BMX_A, BMX_B);
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
-        ASSERT_EQ(st.board_out, 1);
+        ASSERT_EQ(st.board_out, 2);
         ASSERT(bmx_mail("node-b", "*", "result", "job-h",
                         "worker=node-b\nstate=done\nverdict=pass\n"));
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
         ASSERT_EQ(st.board_out, 1);
-        ASSERT_EQ(bmx_signed_by(BMX_B, BMX_B), 2);
+        ASSERT_EQ(bmx_signed_by(BMX_B, BMX_B), 3);
         ASSERT_EQ(bmx_hinted(BMX_B, BMX_B, g_bmx_host[BMX_A]), 2);
         /* Alias and broadcast rows that answer nothing stay local. */
         bmx_use(BMX_A);
@@ -1911,10 +2152,10 @@ static int bmx_t_push_hint(void)
                         "to an agent alias\n"));
         ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
         ASSERT_EQ(st.board_out, 0);
-        ASSERT_EQ(bmx_signed_by(BMX_A, BMX_A), 1);
-        /* No carried post went without its hint. */
-        ASSERT_EQ(bmx_hinted(BMX_A, BMX_A, "-"), 0);
-        ASSERT_EQ(bmx_hinted(BMX_B, BMX_B, "-"), 0);
+        ASSERT_EQ(bmx_signed_by(BMX_A, BMX_A), 2);
+        /* Only broadcast presence went without a hint. */
+        ASSERT_EQ(bmx_hinted(BMX_A, BMX_A, "-"), 1);
+        ASSERT_EQ(bmx_hinted(BMX_B, BMX_B, "-"), 1);
         bmx_teardown();
         PASS();
     }
@@ -1950,7 +2191,7 @@ static int bmx_t_incomplete_page(void)
             ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state", "import_after=0", NULL), 1);
             g_bmx_node[BMX_B].page_fault = BMX_PAGE_OK;
             ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
-            ASSERT_EQ(st.board_in, 1);
+            ASSERT_EQ(st.board_in, 2);
             ASSERT_EQ(st.admitted, 1);
             ASSERT_EQ(bmx_queued("job-page"), 1);
             ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "\"job-page\"", NULL), 1);
@@ -1966,17 +2207,17 @@ static int bmx_t_incomplete_page(void)
             ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
             ASSERT(st.board_deferred >= 1);
             ASSERT_EQ(st.admitted, 0);
-            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state", "import_after=2", NULL), 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state", "import_after=4", NULL), 1);
             g_bmx_node[BMX_B].page_fault = BMX_PAGE_STALLED;
             ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
             ASSERT(st.board_deferred >= 1);
             ASSERT_EQ(st.admitted, 0);
-            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state", "import_after=2", NULL), 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state", "import_after=4", NULL), 1);
             /* An empty page may scan past an unexportable stored row. */
             g_bmx_node[BMX_B].page_fault = BMX_PAGE_EMPTY_ADVANCE;
             ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
             ASSERT_EQ(st.board_deferred, 0);
-            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state", "import_after=3", NULL), 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state", "import_after=5", NULL), 1);
             g_bmx_node[BMX_B].page_fault = BMX_PAGE_OK;
             ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
             ASSERT_EQ(st.board_in, 0);
@@ -2033,11 +2274,11 @@ static int bmx_t_refs_unreadable(void)
         ASSERT_EQ(st.admitted, 1);
         ASSERT(bmx_mail("node-b", "*", "result", "job-1", "worker=node-b\nstate=done\nverdict=pass\n"));
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
-        ASSERT_EQ(g_bmx_node[BMX_B].n, (size_t)3);
-        ASSERT(bmx_signed_peer_post(&g_bmx_node[BMX_B].p[1]));
-        ASSERT(bmx_post_target(&g_bmx_node[BMX_B].p[1], "chatgpt"));
-        ASSERT(bmx_verified_result(&g_bmx_node[BMX_B].p[2]));
-        ASSERT(bmx_post_target(&g_bmx_node[BMX_B].p[2], "*"));
+        ASSERT_EQ(g_bmx_node[BMX_B].n, (size_t)5);
+        ASSERT(bmx_signed_peer_post(&g_bmx_node[BMX_B].p[2]));
+        ASSERT(bmx_post_target(&g_bmx_node[BMX_B].p[2], "chatgpt"));
+        ASSERT(bmx_verified_result(&g_bmx_node[BMX_B].p[4]));
+        ASSERT(bmx_post_target(&g_bmx_node[BMX_B].p[4], "*"));
         bmx_carry(BMX_B, BMX_A);
         const char *unrelated = "{\"seq\":8,\"ts\":\"2026-01-01T00:00:00Z\",\"from\":\"node-b\",\"to\":\"*\",\"kind\":\"result\",\"body\":\"unrelated\",\"ref\":\"other-ref\"}";
         ASSERT(bmx_signed_peer_post(bmx_inject(BMX_A, BMX_B, unrelated, (long long)time(NULL), 3600)));
@@ -2062,7 +2303,7 @@ static int bmx_t_refs_unreadable(void)
         printf("REFS_READ_PROBE page_calls=%u deferred=%d cursor_same=%d before=%lld resumed=%lld in=%lld ack=%lld result=%lld unrelated=%lld\n",
                page_calls, deferred, cursor_same, before_rows, resumed, delivered, ack, done, other);
         ASSERT(result == 1 && page_calls == 0 && deferred && cursor_same && before_rows == 0);
-        ASSERT(resumed == 1 && delivered == 2 && ack == 1 && done == 1 && other == 0);
+        ASSERT(resumed == 1 && delivered == 3 && ack == 1 && done == 1 && other == 0);
         ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
         ASSERT_EQ(st.board_in, 0);
         ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", "job-1", NULL), 2);
@@ -2101,7 +2342,7 @@ static int bmx_t_state_unreadable(void)
         ASSERT_EQ(g_bmx_node[BMX_A].post_calls, before_post);
         ASSERT(bmx_sent("job-state-next"));
         ASSERT_EQ(g_bmx_node[BMX_A].post_calls, before_post + 1);
-        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 2);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 3);
         bmx_teardown(); PASS();
     }
 _test_next:;
@@ -2178,7 +2419,7 @@ static int bmx_t_append_retry(void)
             ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl",
                                 "other-writer", NULL), 1);
             ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state",
-                                "import_after=1", NULL), 1);
+                                "import_after=3", NULL), 1);
             ASSERT_EQ(bmx_queued(ref), 1);
             bmx_forget(BMX_B, "receive/boardmail.state");
             bmx_forget(BMX_B, "receive/intake.state");
@@ -2222,10 +2463,16 @@ static int bmx_t_partial_row(void)
         ASSERT_EQ(bmx_queued("job-partial"), 0);
         ASSERT(bmx_write(BMX_B, "mail/inbox.node-a.jsonl", stored + cut, "ab"));
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
-        ASSERT_EQ(st.board_in, 0);
+        ASSERT_EQ(st.board_in, 1);
         ASSERT_EQ(st.admitted, 1);
+        int presence_len = snprintf(partial, sizeof(partial),
+            "%.*s,\"board_post\":\"%s\",\"board_signer\":\"%s\"}\n",
+            (int)(strlen(g_bmx_node[BMX_B].p[1].text) - 1),
+            g_bmx_node[BMX_B].p[1].text, g_bmx_node[BMX_B].p[1].id,
+            g_bmx_host[BMX_A]);
+        ASSERT(presence_len > 0 && (size_t)presence_len < sizeof(partial));
         ASSERT_EQ(bmx_size(BMX_B, "mail/inbox.node-a.jsonl"),
-                  (long long)strlen(stored));
+                  (long long)strlen(stored) + presence_len);
         ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "job-partial",
                             "\"board_signer\""), 1);
         ASSERT_EQ(bmx_queued("job-partial"), 1);
@@ -2331,13 +2578,14 @@ static int bmx_t_export_rpc_down(void)
     (void)snprintf(datadir_copy, sizeof(datadir_copy), "%s", saved_datadir);
     TEST("boardmail: an unanswered export names its held cursor and read-only RPC check") {
         struct rcv_beat_stats st;
-        char before[4096], after[4096], log[8192];
+        char before[4096], after[4096], log[8192], cursor_log[64];
+        long long held;
         ASSERT(bmx_setup("export-rpc-down"));
         node_rpc_client_init(g_bmx_base, 19381);
         ASSERT_EQ(node_rpc_client_port(), 19381);
-        /* Establish a saved zero cursor before adding the row to be held. */
+        /* Establish the presence cursor before adding the row to be held. */
         ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
-        ASSERT_EQ(bmx_ref_probe_cursor(BMX_A, "export_offset"), 0);
+        held = bmx_ref_probe_cursor(BMX_A, "export_offset"); ASSERT(held > 0);
         bmx_use(BMX_A);
         ASSERT(bmx_grant("chatgpt", NULL, grant, sizeof(grant)));
         ASSERT(bmx_send(grant, "node-b", "job-rpc-down", g_bmx_body,
@@ -2347,13 +2595,15 @@ static int bmx_t_export_rpc_down(void)
         ASSERT(bmx_capture_drive_log(BMX_A, &st, log, sizeof(log)));
         ASSERT(st.board_deferred >= 1);
         ASSERT_EQ(st.board_out, 0);
-        ASSERT_EQ(bmx_ref_probe_cursor(BMX_A, "export_offset"), 0);
+        ASSERT_EQ(bmx_ref_probe_cursor(BMX_A, "export_offset"), held);
         ASSERT(bmx_outbox_row("job-rpc-down", after, sizeof(after)));
         ASSERT_STR_EQ(before, after);
         ASSERT(strstr(log, "board response unverified") != NULL);
         ASSERT(strstr(log, "rpcport=19381") != NULL);
         ASSERT(strstr(log, "stage=export/post") != NULL);
-        ASSERT(strstr(log, "export_offset=0") != NULL);
+        (void)snprintf(cursor_log, sizeof(cursor_log), "export_offset=%lld",
+                       held);
+        ASSERT(strstr(log, cursor_log) != NULL);
         ASSERT(strstr(log,
                       "fleet board status on this receiver's selected "
                       "datadir, rpcport=19381") != NULL);
@@ -2361,13 +2611,13 @@ static int bmx_t_export_rpc_down(void)
         ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
         ASSERT_EQ(st.board_out, 1);
         ASSERT_EQ(bmx_ref_probe_cursor(BMX_A, "export_offset"),
-                  (long long)strlen(before) + 1);
-        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 1);
+                  held + (long long)strlen(before) + 1);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 2);
         ASSERT(bmx_outbox_row("job-rpc-down", after, sizeof(after)));
         ASSERT_STR_EQ(before, after);
         ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
         ASSERT_EQ(st.board_out, 0);
-        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 1);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 2);
         bmx_teardown();
         node_rpc_client_init(datadir_copy, saved_port);
         PASS();
@@ -2418,9 +2668,9 @@ static bool bmx_ref_probe_restore(bool deny, struct bmx_ref_append_probe *p)
     p->import_after = bmx_ref_probe_cursor(BMX_B, "import_after");
     p->export_after = bmx_ref_probe_cursor(BMX_B, "export_offset");
     p->ref_after = bmx_lines(BMX_B, "receive/boardmail.refs", "in job-1 node-a", NULL);
-    if (p->sent_after == 2) {
-        p->signed_ack = bmx_ref_probe_signature(&g_bmx_node[BMX_B].p[1]);
-        p->signed_result = bmx_verified_result(&g_bmx_node[BMX_B].p[2]);
+    if (p->sent_after == 3) {
+        p->signed_ack = bmx_ref_probe_signature(&g_bmx_node[BMX_B].p[3]);
+        p->signed_result = bmx_verified_result(&g_bmx_node[BMX_B].p[4]);
     }
     bmx_carry(BMX_B, BMX_A);
     if (bmx_drive(BMX_A, &st) != 1) return false;
@@ -2472,10 +2722,10 @@ static int bmx_t_refs_append_observation(void)
             denied.ack_local, denied.result_local, denied.sent_before, denied.sent_after, denied.delivered,
             denied.ack_received, denied.result_received, denied.signed_ack, denied.signed_result,
             denied.import_before, denied.import_after, denied.export_before, denied.export_after);
-        ASSERT_EQ(control.in, 1); ASSERT_EQ(control.admitted, 1); ASSERT_EQ(control.queued, 1); ASSERT_EQ(control.ref, 1);
-        ASSERT_EQ(control.sent_after, 2); ASSERT_EQ(control.delivered, 2); ASSERT(control.signed_ack); ASSERT(control.signed_result);
+        ASSERT_EQ(control.in, 2); ASSERT_EQ(control.admitted, 1); ASSERT_EQ(control.queued, 1); ASSERT_EQ(control.ref, 1);
+        ASSERT_EQ(control.sent_after, 3); ASSERT_EQ(control.delivered, 3); ASSERT(control.signed_ack); ASSERT(control.signed_result);
         ASSERT_EQ(denied.in, 0); ASSERT_EQ(denied.admitted, 0); ASSERT_EQ(denied.queued, 0); ASSERT_EQ(denied.ref, 0); ASSERT_EQ(denied.ref_after, 1);
-        ASSERT_EQ(denied.sent_before, 0); ASSERT_EQ(denied.sent_after, 2); ASSERT_EQ(denied.delivered, 2);
+        ASSERT_EQ(denied.sent_before, 1); ASSERT_EQ(denied.sent_after, 3); ASSERT_EQ(denied.delivered, 3);
         ASSERT(denied.signed_ack); ASSERT(denied.signed_result); ASSERT_EQ(denied.ack_received, 1); ASSERT_EQ(denied.result_received, 1);
         PASS();
     }
@@ -2501,7 +2751,7 @@ static int bmx_t_refs_durable_retry(void)
             ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "job-1", NULL), 0);
             g_bmx_ref_fault = false;
             ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
-            ASSERT_EQ(st.board_in, 1);
+            ASSERT_EQ(st.board_in, 2);
             ASSERT_EQ(st.admitted, 1);
             ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.refs", "in job-1 node-a", NULL), 1);
             ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
@@ -2558,12 +2808,11 @@ static int bmx_t_inbox_alloc_diagnostic(void)
         struct rcv_beat_stats st;
         ASSERT(bmx_setup("inbox-allocation-guidance"));
         ASSERT(bmx_sent("job-1")); bmx_carry(BMX_A, BMX_B);
-        long long before = bmx_ref_probe_cursor(BMX_B, "import_after");
         ASSERT(bmx_inbox_alloc_log(&st));
         ASSERT(st.board_deferred >= 1); ASSERT_EQ(st.board_in, 0); ASSERT_EQ(st.admitted, 0);
-        ASSERT_EQ(bmx_ref_probe_cursor(BMX_B, "import_after"), before);
+        ASSERT_EQ(bmx_ref_probe_cursor(BMX_B, "import_after"), 0);
         ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "job-1", NULL), 0);
-        ASSERT_EQ(bmx_drive(BMX_B, &st), 1); ASSERT_EQ(st.board_in, 1); ASSERT_EQ(st.admitted, 1);
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1); ASSERT_EQ(st.board_in, 2); ASSERT_EQ(st.admitted, 1);
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1); ASSERT_EQ(st.board_in, 0);
         PASS();
     }
@@ -2592,7 +2841,7 @@ static int bmx_t_refs_before_inbox_crash(void)
         ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.refs", "in job-1 node-a", NULL), 1);
         ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "job-1", NULL), 0);
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
-        ASSERT_EQ(st.board_in, 1);
+        ASSERT_EQ(st.board_in, 2);
         ASSERT_EQ(st.admitted, 1);
         ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.refs", "in job-1 node-a", NULL), 1);
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
@@ -2619,7 +2868,7 @@ static int bmx_t_refs_invalid_successor(void)
         ASSERT(bmx_sent("job-1"));
         bmx_carry(BMX_A, BMX_B);
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
-        ASSERT_EQ(st.board_in, 2);
+        ASSERT_EQ(st.board_in, 3);
         ASSERT_EQ(st.admitted, 1);
         ASSERT_EQ(bmx_queued("job-1"), 1);
         ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.refs", "in job-1 node-a", NULL), 1);
@@ -2657,12 +2906,12 @@ static int bmx_t_locked_append(void)
                                g_bmx_host[BMX_A]));
         platform_private_file_close(&lock);
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
-        ASSERT_EQ(st.board_in, 0);
+        ASSERT_EQ(st.board_in, 1);
         ASSERT_EQ(st.admitted, 1);
         ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "job-locked",
                             "\"board_signer\""), 1);
         ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state",
-                            "import_after=1", NULL), 1);
+                            "import_after=3", NULL), 1);
         ASSERT_EQ(bmx_queued("job-locked"), 1);
         bmx_teardown();
         PASS();
@@ -2752,6 +3001,7 @@ int test_devagent_boardmail(void)
 {
     int failures = 0;
 #if !defined(_WIN32)
+    failures += bmx_t_presence();
     failures += bmx_t_round_trip();
     failures += bmx_t_unbound_operator();
     failures += bmx_t_regossip();
@@ -2768,6 +3018,8 @@ int test_devagent_boardmail(void)
     failures += bmx_t_delivery();
     failures += bmx_t_push_hint();
     failures += bmx_t_refs_wrap();
+    failures += bmx_t_tampered_mail();
+    failures += bmx_t_presence_unenrolled();
     failures += bmx_t_directory();
     failures += bmx_t_peer_name_memo();
     failures += bmx_t_directory_crowded();

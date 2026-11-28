@@ -782,7 +782,8 @@ static long long rtx_answers_in(const struct json_value *arr, const char *ref,
 
 /* How many mail rows from this receiver under `ref` carry `needle`. Mail
  * answers in bounded pages, so this follows next_since to the last page. */
-static long long rtx_answers(const char *ref, const char *needle)
+static long long rtx_answers_from(const char *from, const char *ref,
+                                  const char *needle)
 {
     char since[4096] = "";
     long long hits = 0;
@@ -796,7 +797,8 @@ static long long rtx_answers(const char *ref, const char *needle)
             (void)json_push_kv_str(&c.input, "since", since);
         else
             (void)json_push_kv_int(&c.input, "since", 0);
-        (void)json_push_kv_str(&c.input, "from", "box-a");
+        if (from)
+            (void)json_push_kv_str(&c.input, "from", from);
         zcl_native_handle_dev_agent_mail(&c.request, &c.reply);
         if (!rtx_ok(&c)) {
             rtx_end(&c);
@@ -810,6 +812,11 @@ static long long rtx_answers(const char *ref, const char *needle)
         rtx_end(&c);
     }
     return hits;
+}
+
+static long long rtx_answers(const char *ref, const char *needle)
+{
+    return rtx_answers_from("box-a", ref, needle);
 }
 
 /* A decided local route. An unknown observation is STEER_NO_ROUTE. */
@@ -2050,6 +2057,74 @@ static void rtx_preflight(struct rtx_call *c, const char *ws, const char *ref,
     zcl_native_handle_dev_agent_receive(&c->request, &c->reply);
 }
 
+static bool rtx_snapshot_file(const char *path, struct sha3_256_ctx *hash)
+{
+    unsigned char bytes[4096];
+    FILE *file = fopen(path, "rb");
+    if (!file)
+        return false;
+    size_t count;
+    while ((count = fread(bytes, 1, sizeof(bytes), file)) != 0)
+        sha3_256_write(hash, bytes, count);
+    bool ok = !ferror(file);
+    return fclose(file) == 0 && ok;
+}
+
+static bool rtx_snapshot_walk(const char *path, struct sha3_256_ctx *hash)
+{
+    struct stat st;
+    char metadata[2400];
+    if (lstat(path, &st) != 0)
+        return false;
+#if defined(__APPLE__)
+    long mtime_ns = st.st_mtimespec.tv_nsec, ctime_ns = st.st_ctimespec.tv_nsec;
+#else
+    long mtime_ns = st.st_mtim.tv_nsec, ctime_ns = st.st_ctim.tv_nsec;
+#endif
+    int n = snprintf(metadata, sizeof(metadata),
+        "%s:%ju:%ju:%jd:%jd:%ld:%jd:%ld", path, (uintmax_t)st.st_mode,
+        (uintmax_t)st.st_ino, (intmax_t)st.st_size, (intmax_t)st.st_mtime,
+        mtime_ns, (intmax_t)st.st_ctime, ctime_ns);
+    if (n < 0 || (size_t)n >= sizeof(metadata))
+        return false;
+    sha3_256_write(hash, (const unsigned char *)metadata, (size_t)n);
+    if (S_ISREG(st.st_mode))
+        return rtx_snapshot_file(path, hash);
+    if (!S_ISDIR(st.st_mode))
+        return false;
+    struct dirent **entries = NULL;
+    int count = scandir(path, &entries, NULL, alphasort);
+    if (count < 0)
+        return false;
+    bool ok = true;
+    for (int i = 0; i < count; i++) {
+        char child[2048];
+        if (strcmp(entries[i]->d_name, ".") && strcmp(entries[i]->d_name, "..")) {
+            n = snprintf(child, sizeof(child), "%s/%s", path, entries[i]->d_name);
+            ok = n > 0 && (size_t)n < sizeof(child) &&
+                rtx_snapshot_walk(child, hash) && ok;
+        }
+        free(entries[i]);
+    }
+    free(entries);
+    return ok;
+}
+
+static bool rtx_snapshot(unsigned char out[32])
+{
+    struct sha3_256_ctx hash;
+    sha3_256_init(&hash);
+    if (lstat(g_rtx_state, &(struct stat){0}) != 0) {
+        if (errno != ENOENT)
+            return false;
+        sha3_256_write(&hash, (const unsigned char *)"absent", 6);
+    } else if (!rtx_snapshot_walk(g_rtx_state, &hash)) {
+        return false;
+    }
+    sha3_256_finalize(&hash, out);
+    return true;
+}
+
 /* Everything a read-only action must leave alone: the receiver's brief and
  * answer-marker dirs, the mail dir, the queue dir, the queued row, and the
  * answers the receiver already posted. */
@@ -2058,18 +2133,23 @@ struct rtx_frozen {
     long long answered;
     long long mail;
     long long queue;
+    long long presence;
     long long queued;
     long long answers;
+    unsigned char durable[32];
+    bool durable_ok;
 };
 
 static void rtx_frozen_take(struct rtx_frozen *s, const char *ref)
 {
     s->brief = rtx_count_dir("receive/brief");
     s->answered = rtx_count_dir("receive/answered");
+    s->presence = rtx_count_dir("presence");
     s->mail = rtx_count_dir("mail");
     s->queue = rtx_count_dir("queue");
     s->queued = rtx_queue_count("queued", ref);
     s->answers = rtx_answers(ref, "");
+    s->durable_ok = rtx_snapshot(s->durable);
 }
 
 static bool rtx_frozen_same(const struct rtx_frozen *a,
@@ -2077,7 +2157,10 @@ static bool rtx_frozen_same(const struct rtx_frozen *a,
 {
     return a->brief == b->brief && a->answered == b->answered &&
            a->mail == b->mail && a->queue == b->queue &&
-           a->queued == b->queued && a->answers == b->answers;
+           a->presence == b->presence &&
+           a->queued == b->queued && a->answers == b->answers &&
+           a->durable_ok && b->durable_ok &&
+           memcmp(a->durable, b->durable, sizeof(a->durable)) == 0;
 }
 
 static int test_receive_preflight(void)
@@ -3074,12 +3157,90 @@ _test_next:;
     return failures;
 }
 #endif
+#if !defined(_WIN32)
+static void rtx_presence_role_expected(const char *receiver, char out[33])
+{
+    unsigned char digest[32];
+    char hex[29];
+    sha3_256((const unsigned char *)receiver, strlen(receiver), digest);
+    zcl_hex_encode(digest, 14, hex);
+    (void)snprintf(out, 33, "r-%.14s-%.14s", hex, hex + 14);
+}
+
+static int test_receive_presence_identity(void)
+{
+    int failures = 0;
+    TEST("receiver presence hashes every legal name and status stays write-free") {
+        struct rcv_drive_opts o;
+        struct rcv_beat_stats st;
+        struct rtx_frozen before, after;
+        struct rtx_call c;
+        char long_a[49], long_b[49], roles[3][33], refs[3][72], role_path[96];
+        const char *names[3];
+        memset(long_a, 'a', 48);
+        long_a[48] = '\0';
+        memcpy(long_b, long_a, sizeof(long_b));
+        long_b[47] = 'b';
+        names[0] = long_a;
+        names[1] = long_b;
+        names[2] = "sk-live-receiver";
+        rtx_isolate("presence-identities");
+        for (size_t i = 0; i < 3; i++) {
+            rtx_presence_role_expected(names[i], roles[i]);
+            (void)snprintf(refs[i], sizeof(refs[i]), "presence-%s", roles[i]);
+            for (size_t j = 0; j < i; j++)
+                ASSERT(strcmp(roles[i], roles[j]) != 0);
+            rtx_opts_ws(&o, g_rtx_ws);
+            (void)snprintf(o.receiver, sizeof(o.receiver), "%s", names[i]);
+            memset(&st, 0, sizeof(st));
+            ASSERT_EQ(zcl_devagent_receive_drive(&o, &st), 1);
+            ASSERT_EQ(rtx_answers_from(NULL, refs[i], "presence.v1;"), 1);
+            ASSERT_EQ(rtx_answers_from(NULL, refs[i], roles[i]), 1);
+            ASSERT_EQ(rtx_answers_from(NULL, refs[i], "task=dev.agent.receive"), 1);
+            ASSERT_EQ(rtx_answers_from(NULL, refs[i], "source=native-receiver"), 1);
+            ASSERT_EQ(rtx_answers_from(NULL, refs[i], "phase=active"), 1);
+            ASSERT_EQ(rtx_answers_from(NULL, refs[i], "/"), 0);
+            ASSERT_EQ(rtx_answers_from(NULL, refs[i], "workspace="), 0);
+        }
+        rtx_opts_ws(&o, g_rtx_ws);
+        (void)snprintf(o.receiver, sizeof(o.receiver), "%s", names[0]);
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(zcl_devagent_receive_drive(&o, &st), 1);
+        ASSERT_EQ(rtx_answers_from(NULL, refs[0], "presence.v1;"), 1);
+        rtx_frozen_take(&before, refs[0]);
+        memset(&st, 0, sizeof(st));
+        ASSERT(zcl_devagent_receive_survey(names[0], g_rtx_ws, &st) >= 0);
+        rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        (void)json_push_kv_str(&c.input, "receiver", names[0]);
+        (void)json_push_kv_str(&c.input, "workspace", g_rtx_ws);
+        zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+        ASSERT(rtx_ok(&c));
+        rtx_end(&c);
+        rtx_frozen_take(&after, refs[0]);
+        ASSERT(rtx_frozen_same(&before, &after));
+        ASSERT_EQ(rtx_answers_from(NULL, refs[0], "presence.v1;"), 1);
+        (void)snprintf(role_path, sizeof(role_path), "presence/role-%s", roles[0]);
+        rtx_frozen_take(&before, refs[0]);
+        ASSERT(rtx_write(role_path, "owner=changed\n"));
+        rtx_frozen_take(&after, refs[0]);
+        ASSERT(!rtx_frozen_same(&before, &after));
+        rtx_restore();
+        PASS();
+    }
+_test_next:;
+    rtx_restore();
+    return failures;
+}
+#endif
+
 int test_devagent_receive(void);
 int test_devagent_receive(void)
 {
     int failures = 0;
 
 #if !defined(_WIN32)
+    failures += test_receive_presence_identity();
     failures += test_receive_export_observation();
     failures += test_receive_export_cursor_edges();
     failures += test_receive_resident_status();

@@ -20,6 +20,7 @@
 
 #include "command/native_command.h"
 
+#include "base/hex.h"
 #include "command/native_dev_agents.h"
 #include "command/native_code_priv.h"
 #include "command/native_devagent.h"
@@ -29,6 +30,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/time_compat.h"
+#include "sha3/sha3.h"
 #include "util/log_macros.h"
 
 #include <ctype.h>
@@ -470,6 +472,31 @@ void zcl_presence_emit(const struct zcl_command_request *req,
     (void)json_push_kv_int(&reply->data, "repeat_every_s", FPR_REPEAT_S);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
+}
+
+void zcl_presence_emit_receiver(const struct zcl_command_request *req,
+                                struct zcl_command_reply *reply,
+                                const char *receiver)
+{
+    struct zcl_presence_in in;
+    unsigned char digest[32];
+    void (*emit)(const struct zcl_command_request *,
+                 struct zcl_command_reply *,
+                 const struct zcl_presence_in *) = zcl_presence_emit;
+    char hex[29], role[33];
+    memset(&in, 0, sizeof(in));
+    zcl_sha3_256((const unsigned char *)receiver, strlen(receiver), digest);
+    zcl_hex_encode(digest, 14, hex);
+    (void)snprintf(role, sizeof(role), "r-%.14s-%.14s", hex, hex + 14);
+    in.role = role;
+    in.owner = role;
+    in.session = role;
+    in.task = "dev.agent.receive";
+    in.phase = "active";
+    in.source = "native-receiver";
+    in.head = "UNKNOWN";
+    in.pid = (long long)getpid();
+    emit(req, reply, &in);
 }
 
 void zcl_native_handle_fleet_steer_presence(

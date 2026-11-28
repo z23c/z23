@@ -244,6 +244,7 @@
 #include "command/native_command.h"
 #include "command/native_devagent.h"
 #include "command/native_fleet.h"
+#include "command/native_fleet_presence.h"
 #include "dev/test_group_catalog.h"
 
 #include "base/hex.h"
@@ -2585,6 +2586,24 @@ static struct zcl_boardmail_ctx rcv_board_ctx(const struct rcv_ctx *c)
     return b;
 }
 
+static void rcv_presence(const struct rcv_ctx *c)
+{
+    struct zcl_command_request req;
+    struct zcl_command_reply reply;
+    struct json_value input;
+    memset(&req, 0, sizeof(req));
+    json_init(&input);
+    json_set_object(&input);
+    req.input = &input;
+    zcl_command_reply_init(&reply, "zcl.fleet_steer_presence.v1");
+    zcl_presence_emit_receiver(&req, &reply, c->receiver);
+    if (reply.status != ZCL_COMMAND_STATUS_PASSED)
+        LOG_WARN(RCV_LOG, "presence post refused for receiver %s: %s",
+                 c->receiver, reply.error.code);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+}
+
 /* Drain up to `cap` intake pages from `since`. Intake stores the pull's
  * raw next_since. Ack and read store only the prefix of returned rows, so
  * a leading result stays uncovered while a later page is still reached.
@@ -2630,8 +2649,9 @@ static void rcv_intake_drain(struct rcv_ctx *c, char *since, unsigned cap)
 /* One beat: carry rows in from the fleet board, drain up to
  * RCV_PAGES_PER_BEAT pages from the intake cursor, persisting the cursor
  * after each handled page, deciding each row from files alone, then carry
- * this box's answers and remote-bound rows out. A survey walks from the
- * beginning instead, carries nothing and persists nothing. */
+ * this box's answers and remote-bound rows out. An active beat emits its
+ * receiver presence immediately before export. A survey walks from the
+ * beginning instead, emits and carries nothing and persists nothing. */
 static void rcv_beat(struct rcv_ctx *c)
 {
     char since[RCV_POS_MAX];
@@ -2644,6 +2664,8 @@ static void rcv_beat(struct rcv_ctx *c)
     (void)snprintf(since, sizeof(since), "%s", c->dry ? "" : c->intake.pos);
     if (import_durable)
         rcv_intake_drain(c, since, c->dry ? RCV_SURVEY_PAGES : RCV_PAGES_PER_BEAT);
+    if (!c->dry)
+        rcv_presence(c);
     zcl_devagent_boardmail_export(&board, c->st);
 }
 
