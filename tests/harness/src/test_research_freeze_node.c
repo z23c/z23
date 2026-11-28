@@ -224,37 +224,31 @@ static int rf_control(struct rf_fixture *f)
     return 0;
 }
 
-int test_research_freeze_node(void)
+static int rf_wallet_journey(struct rf_fixture *f)
+{
+    RF_CHECK(rf_mature_reward(f) == 0);
+    RF_CHECK(rf_deposit_before(f) == 0);
+    RF_CHECK(rf_activate(f) == 0);
+    RF_CHECK(rf_refuse_send(f, 146) == 0);
+    RF_CHECK(rf_refuse_shield(f) == 0);
+    RF_CHECK(rf_withdraw(f, 146, f->shielded) == 0);
+    RF_CHECK(rf_restart(f) == 0);
+    return 0;
+}
+
+static int rf_run(int (*test)(struct rf_fixture *))
 {
     struct rf_fixture f = {0};
-    int failures = 0;
-    if (!rf_setup(&f)) {
-        fprintf(stderr, "research_freeze_node: setup failed\n");
-        failures = 1;
-    } else {
-        failures = rf_schedule(&f);
-    }
+    int failures = !rf_setup(&f);
+    if (!failures) failures = test(&f);
     if (failures && f.node.work[0]) rnf_log_tail(&f.node);
     rnf_cleanup(&f.node);
-    if (!failures) {
-        f = (struct rf_fixture){0};
-        if (!rf_setup(&f)) failures = 1;
-        else failures = rf_mature_reward(&f);
-        if (!failures) failures = rf_deposit_before(&f);
-        if (!failures) failures = rf_activate(&f);
-        if (!failures) failures = rf_refuse_send(&f, 146);
-        if (!failures) failures = rf_refuse_shield(&f);
-        if (!failures) failures = rf_withdraw(&f, 146, f.shielded);
-        if (!failures) failures = rf_restart(&f);
-        if (failures && f.node.work[0]) rnf_log_tail(&f.node);
-        rnf_cleanup(&f.node);
-    }
-    if (!failures) {
-        f = (struct rf_fixture){0};
-        if (!rf_setup(&f)) failures = 1;
-        else failures = rf_control(&f);
-        if (failures && f.node.work[0]) rnf_log_tail(&f.node);
-        rnf_cleanup(&f.node);
-    }
     return failures;
+}
+
+int test_research_freeze_node(void)
+{
+    if (rf_run(rf_schedule)) return 1;
+    if (rf_run(rf_wallet_journey)) return 1;
+    return rf_run(rf_control);
 }
