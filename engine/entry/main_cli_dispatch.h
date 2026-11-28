@@ -48,6 +48,9 @@ struct cli_rpc_params {
 };
 
 int cli_profile_config_check(const char *datadir);
+/* True when argv carries the research selector's name in another letter case
+ * than the one spelling; such an argument is refused on every route. */
+bool cli_selector_misspelled(int argc, char **argv);
 int cli_parse_target_args(int argc, char **argv, struct cli_target_args *t);
 void cli_apply_env_operator_lane(enum zcl_operator_lane *lane);
 void cli_apply_env_rpcport(bool *rpcport_set, int *port);

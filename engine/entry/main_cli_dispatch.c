@@ -129,6 +129,32 @@ static int cli_take_positional(const char *arg, struct cli_target_args *t)
     return CLI_ARGS_OK;
 }
 
+/* The selector has one spelling, and every route compares its name byte for
+ * byte. In any other letter case it matched no check at all and each route
+ * read "no selector": the client forwarded it as a stray RPC parameter and
+ * reached for its default target's cookie, and a worker or a direct import
+ * started as if nothing had been asked. True when an argument's name (after
+ * one or two dashes, up to "=") is the selector's name in any letter case
+ * but the lowercase one. ASCII only: no locale, no <strings.h>. */
+bool cli_selector_misspelled(int argc, char **argv)
+{
+    static const char name[] = "testnet-profile";
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        if (arg[0] != '-') continue;
+        const char *p = arg[1] == '-' ? arg + 2 : arg + 1;
+        size_t n = strcspn(p, "=");
+        if (n != sizeof(name) - 1 || strncmp(p, name, n) == 0) continue;
+        bool same = true;
+        for (size_t k = 0; k < n && same; k++) {
+            char c = p[k];
+            same = (c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c) == name[k];
+        }
+        if (same) return true;
+    }
+    return false;
+}
+
 /* Operator target flags are accepted before or after the method so
  * `z23 agent -datadir=... -rpcport=...` cannot accidentally query
  * the default service while an agent is trying to inspect a lane. */

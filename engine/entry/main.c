@@ -1230,11 +1230,17 @@ static void main_device_host_runtime(int argc, char **argv)
         zcl_native_device_host_runtime_exit_if_requested(argc, argv);
 }
 
+#include "main_cli_dispatch.h"
 static bool main_research_prepare(int argc, char ***args,
                                   struct main_research_selection *research,
                                   char *path, size_t capacity)
 {
     char **argv = *args;
+    if (cli_selector_misspelled(argc, argv)) {
+        fprintf(stderr, "Invalid or unsafe testnet profile invocation: "
+                        "the selector is spelled -testnet-profile.\n");
+        return false;
+    }
     if (is_cli_mode(argc, argv) && !main_research_direct_mode(argc, argv)) {
         if (main_research_selector_present(argc, argv)) {
             if (main_research_client_forbidden(argc, argv)) {

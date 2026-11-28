@@ -1859,6 +1859,74 @@ static int cas_test_research_method_order(void)
     return failures;
 }
 
+/* The selector is one spelling. In any other letter case its name used to
+ * match no check at all, so every route read it as "no selector": the client
+ * forwarded it and reached for its default target's cookie, and a worker or a
+ * direct import started as if nothing had been asked.
+ *
+ * A client or tool route always returns, so there the refusal is also an
+ * exit code. A route that may start something runs bounded: the refusal text
+ * must appear before the deadline and the child is then killed, so an
+ * unfixed binary cannot hang the test. */
+static bool cas_selector_case_refused(char *const argv[], const char *home,
+                                      bool returns, char *out, size_t cap)
+{
+    static const char *const needle = "the selector is spelled -testnet-profile";
+    const char *const needles[] = {needle, NULL};
+    if (!returns)
+        return cas_run_daemon_wait_for(argv, home, needles, 4000, out, cap);
+    int rc = cas_run(argv, home, out, cap);
+    return rc == 1 && cas_contains(out, needle);
+}
+
+static int cas_test_research_selector_case(void)
+{
+    int failures = 0;
+    TEST("research selector in any other letter case is refused on every route") {
+        char home[PATH_MAX], out[8192], dd[PATH_MAX + 32];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_research_case") != NULL);
+        ASSERT(snprintf(dd, sizeof(dd), "-datadir=%s/dd", home) > 0);
+        /* "@" stands for the selector; `returns` marks a client or tool
+         * route. The longest route has four words, so the slot array needs
+         * five: the loop stops on its null terminator. */
+        const struct { const char *a[5]; bool returns; } routes[] = {
+            {{CAS_BIN, "@", "getblockcount"}, true},
+            {{CAS_BIN, "getblockcount", "@"}, true},
+            {{CAS_BIN, "--status", "@"}, true},
+            {{CAS_BIN, "@", "--agent"}, true},
+            {{CAS_BIN, "--app-host-worker", "@"}, false},
+            {{CAS_BIN, "-gui", "@"}, false},
+            {{CAS_BIN, "jsonq", "@"}, true},
+            {{CAS_BIN, "mcp", "serve", "@"}, true},
+        };
+        const char *const spellings[] = {"-Testnet-profile=ironwood",
+            "--TESTNET-PROFILE=ironwood", "-Testnet-Profile=ironwood", "-Testnet-profile"};
+        bool refused = true;
+        for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
+            for (size_t j = 0; j < sizeof(spellings) / sizeof(spellings[0]); j++) {
+                char *argv[5] = {0};
+                for (size_t k = 0; routes[i].a[k]; k++)
+                    argv[k] = (char *)(routes[i].a[k][0] == '@' ? spellings[j] : routes[i].a[k]);
+                bool ok = cas_selector_case_refused(argv, home, routes[i].returns,
+                                                    out, sizeof(out));
+                if (!ok)
+                    fprintf(stderr, "selector case: route %zu spelling %zu: %s\n", i, j, out);
+                refused = refused && ok;
+            }
+        }
+        /* A direct import is refused before its datadir exists. */
+        char *direct[] = {CAS_BIN, "--importblockindex", dd, (char *)spellings[0], NULL};
+        bool direct_refused = cas_selector_case_refused(direct, home, false, out, sizeof(out));
+        bool untouched = !cas_file_exists(dd + 9);
+        test_cleanup_tmpdir(home);
+        if (!refused || !direct_refused || !untouched)
+            fprintf(stderr, "selector case: routes=%d direct=%d untouched=%d\n",
+                    refused, direct_refused, untouched);
+        ASSERT(refused && direct_refused && untouched);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 
 static int cas_test_research_marker_guards(void)
 {
@@ -2205,6 +2273,7 @@ int test_cli_argv_strict(void)
     failures += cas_test_research_nonclient_dispatch();
     failures += cas_test_research_client_aliases();
     failures += cas_test_research_method_order();
+    failures += cas_test_research_selector_case();
     failures += cas_test_research_marker_guards();
     failures += cas_test_research_empty_mode();
     failures += cas_test_research_private_directory();
