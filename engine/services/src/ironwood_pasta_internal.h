@@ -6,6 +6,8 @@
 #include <openssl/ec.h>
 #include <stdint.h>
 enum ironwood_pasta_curve { IRONWOOD_PALLAS, IRONWOOD_VESTA };
+/* Caller owns the returned BIGNUM; NULL means allocation failure. */
+BIGNUM *ironwood_pasta_fp_modulus(void);
 struct zcl_result ironwood_pasta_fp_canonical(const uint8_t bytes[32]);
 struct zcl_result ironwood_pasta_group(enum ironwood_pasta_curve curve, BN_CTX *ctx,
                                        EC_GROUP **out);

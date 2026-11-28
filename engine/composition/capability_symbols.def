@@ -928,8 +928,11 @@ ZCL_CAPABILITY_SYMBOL("BIO_new", CAP_HARMLESS,
 ZCL_CAPABILITY_SYMBOL("BIO_s_mem", CAP_HARMLESS,
     "The memory method, which is the only BIO method this tree "
     "references.")
+ZCL_CAPABILITY_SYMBOL("BN_CTX_end", CAP_HARMLESS, "Releases temporary integer slots within a caller-owned context.")
 ZCL_CAPABILITY_SYMBOL("BN_CTX_free", CAP_HARMLESS, "Releases temporary integer storage.")
+ZCL_CAPABILITY_SYMBOL("BN_CTX_get", CAP_HARMLESS, "Obtains a temporary integer from a caller-owned context.")
 ZCL_CAPABILITY_SYMBOL("BN_CTX_new", CAP_HARMLESS, "Allocates a context for in-memory integer arithmetic.")
+ZCL_CAPABILITY_SYMBOL("BN_CTX_start", CAP_HARMLESS, "Starts a temporary integer frame in a caller-owned context.")
 ZCL_CAPABILITY_SYMBOL("BN_bn2lebinpad", CAP_HARMLESS, "Serializes an integer into the caller's little-endian buffer.")
 ZCL_CAPABILITY_SYMBOL("BN_free", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("BN_is_odd", CAP_HARMLESS, "Tests the low bit of an in-memory integer.")

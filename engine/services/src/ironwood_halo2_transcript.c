@@ -17,6 +17,19 @@ static const struct arith_uint256 vesta_base_modulus = { .pn = {
     0, 0, 0, 0x40000000u
 }};
 
+static void modulus_le_bytes(const struct arith_uint256 *modulus, uint8_t out[32])
+{
+    for (size_t i = 0; i < 32; ++i)
+        out[i] = (uint8_t)(modulus->pn[i / 4] >> ((i % 4) * 8));
+}
+
+BIGNUM *ironwood_pasta_fp_modulus(void)
+{
+    uint8_t bytes[32];
+    modulus_le_bytes(&vesta_scalar_modulus, bytes);
+    return BN_lebin2bn(bytes, sizeof bytes, NULL);
+}
+
 static bool field_canonical(const uint8_t bytes[32], const struct arith_uint256 *modulus)
 {
     struct arith_uint256 value = {0};
@@ -134,8 +147,7 @@ struct zcl_result ironwood_pasta_group(enum ironwood_pasta_curve kind, BN_CTX *c
     const struct arith_uint256 *modulus = kind == IRONWOOD_PALLAS ?
         &vesta_scalar_modulus : &vesta_base_modulus;
     uint8_t prime_bytes[32];
-    for (size_t i = 0; i < 32; ++i)
-        prime_bytes[i] = (uint8_t)(modulus->pn[i / 4] >> ((i % 4) * 8));
+    modulus_le_bytes(modulus, prime_bytes);
     BIGNUM *prime = BN_lebin2bn(prime_bytes, 32, NULL), *zero = BN_new(), *five = BN_new();
     EC_GROUP *group = NULL;
     if (prime && zero && five && BN_set_word(five, 5))
