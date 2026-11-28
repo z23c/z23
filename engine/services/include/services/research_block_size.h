@@ -52,11 +52,12 @@ static inline size_t research_block_size_limit_for(const struct chain_params *pa
     return capped ? RESEARCH_BLOCK_SIZE_LIMIT : research_block_size_ceiling(params);
 }
 
-/* Classify `block` against one explicit limit. Ordinary chains retain
- * their existing validation; the research profile serializes into a
- * fixed-capacity buffer to bound memory usage. */
+/* Classify `block` against one explicit limit. Only the research limit is
+ * measured here (serialized into a fixed-capacity buffer, to bound memory);
+ * any other limit is left to the chain's existing validation and
+ * classifies OK. A zero limit classifies UNAVAILABLE. */
 static inline enum research_block_size_verdict research_block_size_check_under(
-    const struct chain_params *params, const struct block *block, size_t limit)
+    const struct block *block, size_t limit)
 {
     if (!limit || !block)
         return RESEARCH_BLOCK_SIZE_UNAVAILABLE;
@@ -85,7 +86,7 @@ static inline enum research_block_size_verdict research_block_size_check_under(
 static inline enum research_block_size_verdict research_block_size_check(
     const struct chain_params *params, const struct block *block)
 {
-    return research_block_size_check_under(params, block,
+    return research_block_size_check_under(block,
                                            research_block_size_limit(params));
 }
 #endif
