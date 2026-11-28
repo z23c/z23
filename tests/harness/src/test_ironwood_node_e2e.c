@@ -717,6 +717,15 @@ static bool iw_ready_byte(int fd, long ms)
            read(fd, &byte, 1) == 1;
 }
 
+/* Child side of a readiness pipe: one byte, then the caller waits. When the
+ * byte cannot be written the child ends, so the parent sees end-of-file at
+ * its bounded poll instead of a child that waits forever. */
+static void iw_ready_signal(int fd)
+{
+    if (write(fd, "R", 1) != 1)
+        _exit(127);
+}
+
 static int iw_test_signal_flag_only(void)
 {
     int failures = 0;
@@ -729,7 +738,7 @@ static int iw_test_signal_flag_only(void)
             close(ready[0]);
             (void)setpgid(0, 0);
             (void)signal(SIGTERM, SIG_IGN);
-            (void)write(ready[1], "R", 1);
+            iw_ready_signal(ready[1]);
             for (;;) pause();
         }
         (void)setpgid(pid, pid);
@@ -768,7 +777,7 @@ static int iw_test_stop_deadline(void)
             close(ready[0]);
             (void)setpgid(0, 0);
             (void)signal(SIGTERM, SIG_IGN);
-            (void)write(ready[1], "R", 1);
+            iw_ready_signal(ready[1]);
             for (;;) pause();
         }
         (void)setpgid(pid, pid);
