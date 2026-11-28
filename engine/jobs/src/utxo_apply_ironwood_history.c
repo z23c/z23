@@ -120,6 +120,10 @@ static struct zcl_result history_body(const struct ironwood_history_cursor *in,
         block_free(&block);
         return ZCL_ERR(-1, "Ironwood history block body unavailable");
     }
+    if (block.header.nSolutionSize > MAX_SOLUTION_SIZE) {
+        block_free(&block);
+        return ZCL_ERR(-1, "Ironwood history block solution too large");
+    }
     struct uint256 hash;
     block_get_hash(&block, &hash);
     struct zcl_result r = ZCL_OK;

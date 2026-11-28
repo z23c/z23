@@ -26,7 +26,7 @@ static bool history_reader(struct block *out, const struct block_index *bi,
     if (!block_clone(out, &f->bodies[bi->nHeight])) return false;
     if (bi->nHeight == 1 && f->corrupt_tx) out->vtx[1].hash.data[0] ^= 1;
     if (bi->nHeight == 1 && f->corrupt_prev) out->header.hashPrevBlock.data[0] ^= 1;
-    if (bi->nHeight == 1 && f->corrupt_merkle) out->vtx[1].v6_wire.data[100] ^= 1;
+    if (bi->nHeight == 1 && f->corrupt_merkle) out->vtx[1].v6_wire.data[12] ^= 1;
     return true;
 }
 
@@ -69,7 +69,7 @@ static bool history_step_ok(struct ironwood_history_cursor *c, struct history_fi
                             struct ironwood_history_event *event)
 {
     struct ironwood_history_cursor next;
-    if (!utxo_ironwood_history_step(c, history_reader, NULL, f, &next, event).ok) return false;
+    struct zcl_result r = utxo_ironwood_history_step(c, history_reader, NULL, f, &next, event); if (!r.ok) { fprintf(stderr, "history step: %s\n", r.message); return false; }
     *c = next;
     return true;
 }
@@ -129,7 +129,7 @@ static bool history_wrong_genesis(struct history_fixture *f)
 int test_utxo_apply_ironwood_history(void)
 {
     struct history_fixture f = {0};
-    bool ok = history_fixture_make(&f) && history_positive(&f) && history_wrong_genesis(&f);
+    bool setup = history_fixture_make(&f); bool positive = setup && history_positive(&f); bool negative = positive && history_wrong_genesis(&f); bool ok = negative; if (!ok) fprintf(stderr, "history setup=%d positive=%d negative=%d\n", setup, positive, negative);
     block_free(&f.bodies[0]);
     block_free(&f.bodies[1]);
     chain_params_select(CHAIN_MAIN);
