@@ -1,6 +1,7 @@
 /* purpose: Compare Ironwood frontier transitions with Orchard 0.16 anchors. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_note_frontier.h"
+#include "primitives/transaction_v6_wire.h"
 #include "services/ironwood_resident_params.h"
 #include "base/hex.h"
 #include <stdio.h>
@@ -134,6 +135,42 @@ static bool capacity(const uint8_t *params)
            memcmp(&full, &tree, sizeof full) == 0 && correct_anchor(0, root);
 }
 
+static bool read_wire(const char *path, uint8_t *wire, size_t size)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    bool ok = fread(wire, 1, size, f) == size && fgetc(f) == EOF && !ferror(f);
+    return fclose(f) == 0 && ok;
+}
+
+static bool read_payment_pair(uint8_t payment[9313], uint8_t withdrawal[9200])
+{
+    return read_wire("tests/fixtures/ironwood/postnu63-h1-reward-spend.v6", payment, 9313) &&
+        read_wire("tests/fixtures/ironwood/postnu63-h1-reward-withdrawal.v6", withdrawal, 9200);
+}
+
+/* The withdrawal spends the second note of this public payment fixture. */
+static bool wire_payment(const uint8_t *params)
+{
+    uint8_t payment[9313], withdrawal[9200], root[32];
+    struct v6_wire_view pay, spend;
+    struct v6_action_view second;
+    struct ironwood_note_frontier tree = {0}, saved;
+    if (!read_payment_pair(payment, withdrawal) ||
+        v6_core_parse(payment, sizeof payment, &pay) != V6_WIRE_OK || pay.ironwood.count != 2 ||
+        v6_core_parse(withdrawal, sizeof withdrawal, &spend) != V6_WIRE_OK || spend.ironwood.anchor.size != 32 ||
+        !v6_core_bundle_action(&pay.ironwood, 1, &second) || second.cmx.size != 32 ||
+        !ironwood_frontier_append_v6(&tree, payment, sizeof payment, params, IRONWOOD_MERKLE_PARAMETERS_SIZE).ok ||
+        tree.count != 2 || !ironwood_note_frontier_extend(&tree, NULL, 0, params,
+            IRONWOOD_MERKLE_PARAMETERS_SIZE, root).ok || memcmp(root, spend.ironwood.anchor.data, 32)) return false;
+    memcpy(&saved, &tree, sizeof saved);
+    if (ironwood_frontier_append_v6(&tree, payment, sizeof payment - 1, params,
+            IRONWOOD_MERKLE_PARAMETERS_SIZE).ok || memcmp(&saved, &tree, sizeof tree)) return false;
+    memset(payment + (second.cmx.data - payment), 0xff, 32);
+    return !ironwood_frontier_append_v6(&tree, payment, sizeof payment, params,
+            IRONWOOD_MERKLE_PARAMETERS_SIZE).ok && !memcmp(&saved, &tree, sizeof tree);
+}
+
 int test_ironwood_note_frontier(void)
 {
     uint8_t leaves[4][32];
@@ -142,6 +179,7 @@ int test_ironwood_note_frontier(void)
     if (!params || size != IRONWOOD_MERKLE_PARAMETERS_SIZE) return 1;
     if (!zcl_hex_decode("7bd7041a794980ac3d8c413946d9a58e2b70de01ad27bfe18959f63d90e2b31a", leaves[0], 32) ||
         !zcl_hex_decode("72d98fa009f5a73de8e05e9e25744cf6518f503881b1ed4056ae4fe176120f04", leaves[1], 32)) return 1;
+    if (!wire_payment(params)) return 1;
     memcpy(leaves + 2, leaves, 64);
     return append_shapes(params, leaves) && rollback(params, leaves) && damaged_checkpoints(params, leaves) && capacity(params) ? 0 : 1;
 }

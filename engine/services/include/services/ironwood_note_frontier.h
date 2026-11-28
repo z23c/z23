@@ -35,4 +35,10 @@ struct zcl_result ironwood_frontier_encode(const struct ironwood_note_frontier *
 struct zcl_result ironwood_frontier_restore(const uint8_t *bytes, size_t size,
     uint64_t expected_count, const uint8_t expected_root[32], const uint8_t *parameters,
     size_t parameters_size, struct ironwood_note_frontier *out);
+/* Fold one fully framed v6 transaction's Ironwood note commitments in wire
+ * order. The reducer separately authenticates the transaction and its spend
+ * anchor. No root is computed here: the block caller can derive it once after
+ * all transactions. Failure leaves the entire frontier unchanged. */
+struct zcl_result ironwood_frontier_append_v6(struct ironwood_note_frontier *frontier,
+    const uint8_t *wire, size_t wire_size, const uint8_t *parameters, size_t parameters_size);
 #endif

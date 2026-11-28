@@ -2,6 +2,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_note_frontier.h"
 #include "ironwood_pasta_internal.h"
+#include "primitives/transaction_v6_wire.h"
 #include "base/serialize_le.h"
 #include <string.h>
 
@@ -128,5 +129,29 @@ struct zcl_result ironwood_frontier_restore(const uint8_t *bytes, size_t size,
     if (memcmp(root, expected_root, sizeof root))
         return ZCL_ERR(-1, "Ironwood frontier does not match expected anchor");
     *out = next;
+    return ZCL_OK;
+}
+
+struct zcl_result ironwood_frontier_append_v6(struct ironwood_note_frontier *frontier,
+    const uint8_t *wire, size_t wire_size, const uint8_t *parameters, size_t parameters_size)
+{
+    if (!frontier || frontier->count > NOTE_CAPACITY)
+        return ZCL_ERR(-1, "Invalid Ironwood frontier");
+    struct v6_wire_view view;
+    if (v6_core_parse(wire, wire_size, &view) != V6_WIRE_OK)
+        return ZCL_ERR(-1, "Invalid v6 transaction frame for Ironwood frontier");
+    if (view.ironwood.count > NOTE_CAPACITY - frontier->count)
+        return ZCL_ERR(-1, "Ironwood block commitments exceed tree capacity");
+    struct zcl_result r = ironwood_merkle_parameters_validate(parameters, parameters_size);
+    if (!r.ok) return r;
+    struct ironwood_note_frontier next = *frontier;
+    for (uint64_t i = 0; i < view.ironwood.count; ++i) {
+        struct v6_action_view action;
+        if (!v6_core_bundle_action(&view.ironwood, i, &action) || action.cmx.size != 32)
+            return ZCL_ERR(-1, "Cannot read Ironwood action commitment");
+        r = append_commitment(&next, action.cmx.data, parameters, parameters_size);
+        if (!r.ok) return r;
+    }
+    *frontier = next;
     return ZCL_OK;
 }
