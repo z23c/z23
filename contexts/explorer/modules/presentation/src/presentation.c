@@ -53,10 +53,12 @@ int present_x11_clipboard_write_target(
 #define RGFW_IMPLEMENTATION
 #define RGFW_NO_API
 #define RGFW_NO_IOKIT
-#if defined(__ANDROID__)
-/* External vendor definitions may call Bionic's internal fortified wrappers
- * without violating C inline linkage in this single implementation unit. */
+#if defined(__linux__)
+/* This private implementation unit can call libc fortified wrappers from
+ * RGFW functions without giving those functions external inline linkage. */
 #define RGFWDEF
+#endif
+#if defined(__ANDROID__)
 #define XDLDEF
 #endif
 #if defined(__clang__)
