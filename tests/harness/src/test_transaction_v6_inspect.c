@@ -252,6 +252,25 @@ static bool check_funded_view(const uint8_t *s, const struct ironwood_instance_r
         !ironwood_instance_project(&v, 1, &actual);
 }
 
+static bool check_funded_controls(const uint8_t *original)
+{
+    uint8_t s[V6_IRONWOOD_STATEMENT_SIZE];
+    struct ironwood_instance_rows out, saved;
+    memcpy(s, original, sizeof s);
+    memset(&out, 0xa5, sizeof out); memcpy(&saved, &out, sizeof out);
+    s[160] = 2;
+    if (ironwood_instance_from_statement(s, sizeof s, &out)) return false;
+    memcpy(s, original, sizeof s); memset(s, 0xff, 32);
+    if (ironwood_instance_from_statement(s, sizeof s, &out)) return false;
+    memcpy(s, original, sizeof s); memset(s + 96, 0, 32);
+    if (ironwood_instance_from_statement(s, sizeof s, &out) ||
+        memcmp(&out, &saved, sizeof out)) return false;
+    memcpy(s, original, sizeof s); memset(s + 32, 0, 32);
+    if (!ironwood_instance_from_statement(s, sizeof s, &out)) return false;
+    uint8_t zero[32] = {0};
+    return !memcmp(out.row[1], zero, 32) && !memcmp(out.row[2], zero, 32);
+}
+
 /* Funded reopened spend, Orchard 0.16.0 PostNu6_3 to_halo2_instance;
  * R1 ironwood-vk-repro.RZfQAkV6/rows-run2.log, action zero. */
 static bool check_funded_instance(void)
@@ -281,7 +300,7 @@ static bool check_funded_instance(void)
         !ironwood_instance_from_statement(s, sizeof s, &got)) return false;
     for (size_t i = 0; i < IRONWOOD_INSTANCE_ROWS; ++i)
         if (!zcl_hex_decode(rows[i], expected, 32) || memcmp(got.row[i], expected, 32)) return false;
-    return check_funded_view(s, &got);
+    return check_funded_view(s, &got) && check_funded_controls(s);
 }
 
 static bool check_instance_refusals(void)
@@ -293,6 +312,35 @@ static bool check_instance_refusals(void)
         ironwood_instance_from_statement(s, sizeof s - 1, &out) ||
         ironwood_instance_project(NULL, 0, &out)) return false; /* identity rk */
     return !memcmp(&out, &before, sizeof out);
+}
+
+static bool check_funded_second_instance(void)
+{
+    static const char statement[] =
+        "c54832e4998cf9088b77703c858865e752241c1c0115909caeeffaf1396e370e"
+        "6040aaadabcee434225ed88c72fe893488c9be4c0986ea934fc36d8a05a9c52c"
+        "16cbac01db396328cf81c873fe12cc4e77e6233a2a67c89bc6ee81faba151919"
+        "c34f9b620a939918a1c81907e072d15961200afdf9fe05b9c44fd6006abace38"
+        "75f7a99688cc5939df2646f9eb7e1be51c60b2d84e728dff790bf1807f72963a010100";
+    static const char *rows[] = {
+        "c54832e4998cf9088b77703c858865e752241c1c0115909caeeffaf1396e370e",
+        "6040aaadabcee434225ed88c72fe893488c9be4c0986ea934fc36d8a05a9c52c",
+        "7edbf5121bc034db31bac9c7886ec970f9ebcde41029167e102aad3e6d08e41f",
+        "16cbac01db396328cf81c873fe12cc4e77e6233a2a67c89bc6ee81faba151919",
+        "c34f9b620a939918a1c81907e072d15961200afdf9fe05b9c44fd6006abace38",
+        "ae4e600b929038bf1a66b818e17d9db530de88799ef12ecebdfa81a7fb679137",
+        "75f7a99688cc5939df2646f9eb7e1be51c60b2d84e728dff790bf1807f72963a",
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "0000000000000000000000000000000000000000000000000000000000000000"
+    };
+    uint8_t s[V6_IRONWOOD_STATEMENT_SIZE], expected[32];
+    struct ironwood_instance_rows got;
+    if (!zcl_hex_decode(statement, s, sizeof s) ||
+        !ironwood_instance_from_statement(s, sizeof s, &got)) return false;
+    for (size_t i = 0; i < IRONWOOD_INSTANCE_ROWS; ++i)
+        if (!zcl_hex_decode(rows[i], expected, 32) || memcmp(got.row[i], expected, 32)) return false;
+    return check_funded_view(s, &got);
 }
 
 static bool check_statement_views(void)
@@ -450,6 +498,7 @@ int test_transaction_v6_inspect(void)
     if (!check_action_views()) ++failures;
     if (!check_statement_views()) ++failures;
     if (!check_funded_instance()) ++failures;
+    if (!check_funded_second_instance()) ++failures;
     if (!check_instance_refusals()) ++failures;
     if (!check_empty_view()) ++failures;
     if (!check_empty_digests()) ++failures;

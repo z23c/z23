@@ -1,6 +1,7 @@
 /* purpose: Frame Halo2 transcript input and derive challenge bytes. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_halo2_transcript.h"
+#include "ironwood_pasta_internal.h"
 #include "codec/cursor.h"
 #include "core/arith_uint256.h"
 #include <string.h>
@@ -11,6 +12,23 @@ static const struct arith_uint256 vesta_scalar_modulus = { .pn = {
     0x00000001u, 0x992d30edu, 0x094cf91bu, 0x224698fcu,
     0, 0, 0, 0x40000000u
 }};
+static const struct arith_uint256 vesta_base_modulus = { .pn = {
+    0x00000001u, 0x8c46eb21u, 0x0994a8ddu, 0x224698fcu,
+    0, 0, 0, 0x40000000u
+}};
+
+static bool field_canonical(const uint8_t bytes[32], const struct arith_uint256 *modulus)
+{
+    struct arith_uint256 value = {0};
+    for (size_t i = 0; i < 32; ++i)
+        value.pn[i / 4] |= (uint32_t)bytes[i] << ((i % 4) * 8);
+    return arith_uint256_compare(&value, modulus) < 0;
+}
+
+bool ironwood_pasta_fp_canonical(const uint8_t bytes[32])
+{
+    return field_canonical(bytes, &vesta_scalar_modulus);
+}
 
 struct zcl_result ironwood_halo2_transcript_init(struct ironwood_halo2_transcript *t)
 {
@@ -60,10 +78,7 @@ struct zcl_result ironwood_halo2_read_scalar(struct ironwood_halo2_transcript *t
     if (!bytes) return ZCL_ERR(-1, "Truncated scalar");
     uint8_t scalar[32];
     memcpy(scalar, bytes, sizeof scalar);
-    struct arith_uint256 value = {0};
-    for (size_t i = 0; i < sizeof scalar; ++i)
-        value.pn[i / 4] |= (uint32_t)scalar[i] << ((i % 4) * 8);
-    if (arith_uint256_compare(&value, &vesta_scalar_modulus) >= 0)
+    if (!ironwood_pasta_fp_canonical(scalar))
         return ZCL_ERR(-1, "Noncanonical Vesta scalar");
     struct ironwood_halo2_transcript next_t = *t;
     struct zcl_result result = ironwood_halo2_transcript_scalar(&next_t, scalar, sizeof scalar);
@@ -84,26 +99,18 @@ static bool vesta_affine(const EC_GROUP *curve, EC_POINT *point, BIGNUM *x,
         BN_bn2lebinpad(x, out, 32) == 32 && BN_bn2lebinpad(y, out + 32, 32) == 32;
 }
 
-/* Vesta coordinates and proof bytes are public. OpenSSL BN/EC operations
- * here are variable-time and must never be used for secret values. */
-static bool decode_vesta_point(const uint8_t encoded[32], uint8_t affine[64])
+static bool pasta_decode(const uint8_t xbytes[32], unsigned sign,
+                         const struct arith_uint256 *modulus, uint8_t affine[64])
 {
-    static const char fq[] =
-        "40000000000000000000000000000000224698FC0994A8DD8C46EB2100000001";
-    uint8_t xbytes[32];
-    memcpy(xbytes, encoded, sizeof xbytes);
-    unsigned sign = xbytes[31] >> 7;
-    xbytes[31] &= 0x7f;
-    uint8_t any = 0;
-    for (size_t i = 0; i < sizeof xbytes; ++i) any |= xbytes[i];
-    if (!any && !sign) return false; /* Halo2 read_point refuses identity. */
+    uint8_t prime_bytes[32];
+    for (size_t i = 0; i < 32; ++i)
+        prime_bytes[i] = (uint8_t)(modulus->pn[i / 4] >> ((i % 4) * 8));
     BN_CTX *ctx = BN_CTX_new();
-    BIGNUM *prime = NULL, *zero = BN_new(), *five = BN_new();
-    BIGNUM *x = BN_lebin2bn(xbytes, sizeof xbytes, NULL), *y = BN_new();
+    BIGNUM *prime = BN_lebin2bn(prime_bytes, 32, NULL), *zero = BN_new(), *five = BN_new();
+    BIGNUM *x = BN_lebin2bn(xbytes, 32, NULL), *y = BN_new();
     EC_GROUP *curve = NULL;
     EC_POINT *point = NULL;
-    bool ok = ctx && zero && five && x && y && BN_hex2bn(&prime, fq) &&
-        BN_set_word(five, 5) && BN_cmp(x, prime) < 0;
+    bool ok = ctx && prime && zero && five && x && y && BN_set_word(five, 5);
     if (ok) { curve = EC_GROUP_new_curve_GFp(prime, zero, five, ctx); ok = curve != NULL; }
     if (ok) { point = EC_POINT_new(curve); ok = point != NULL; }
     if (ok) ok = vesta_affine(curve, point, x, y, sign, ctx, affine);
@@ -112,6 +119,28 @@ static bool decode_vesta_point(const uint8_t encoded[32], uint8_t affine[64])
     BN_free(y); BN_free(x); BN_free(five); BN_free(zero); BN_free(prime);
     BN_CTX_free(ctx);
     return ok;
+}
+
+/* Coordinates and proof bytes are public; BN/EC operations are variable-time. */
+bool ironwood_pasta_point(const uint8_t encoded[32], enum ironwood_pasta_curve kind,
+                          bool allow_identity, uint8_t affine[64])
+{
+    if (kind != IRONWOOD_PALLAS && kind != IRONWOOD_VESTA) return false;
+    const struct arith_uint256 *modulus = kind == IRONWOOD_PALLAS ?
+        &vesta_scalar_modulus : &vesta_base_modulus;
+    uint8_t xbytes[32];
+    memcpy(xbytes, encoded, sizeof xbytes);
+    unsigned sign = xbytes[31] >> 7;
+    xbytes[31] &= 0x7f;
+    uint8_t any = 0;
+    for (size_t i = 0; i < sizeof xbytes; ++i) any |= xbytes[i];
+    if (!field_canonical(xbytes, modulus)) return false;
+    if (!any && !sign) {
+        if (!allow_identity) return false;
+        memset(affine, 0, 64);
+        return true;
+    }
+    return pasta_decode(xbytes, sign, modulus, affine);
 }
 
 struct zcl_result ironwood_halo2_read_point(struct ironwood_halo2_transcript *t,
@@ -124,7 +153,8 @@ struct zcl_result ironwood_halo2_read_point(struct ironwood_halo2_transcript *t,
     const uint8_t *bytes = zcl_codec_take(&next_reader, 32);
     if (!bytes) return ZCL_ERR(-1, "Truncated point");
     uint8_t affine[64];
-    if (!decode_vesta_point(bytes, affine)) return ZCL_ERR(-1, "Invalid Vesta point");
+    if (!ironwood_pasta_point(bytes, IRONWOOD_VESTA, false, affine))
+        return ZCL_ERR(-1, "Invalid Vesta point");
     struct ironwood_halo2_transcript next_t = *t;
     struct zcl_result result = ironwood_halo2_transcript_point(&next_t, affine, sizeof affine);
     if (!result.ok) return result;
