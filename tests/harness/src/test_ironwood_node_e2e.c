@@ -18,6 +18,7 @@ struct iw_state {
 
 static struct iw_state iw;
 static volatile sig_atomic_t iw_miner_pid, iw_follower_pid;
+static volatile sig_atomic_t iw_rpc_pid;
 static struct sigaction iw_old_int, iw_old_term;
 static bool iw_armed;
 static volatile sig_atomic_t iw_interrupted;
@@ -40,6 +41,12 @@ static void iw_title_begin(const char *name, long duration)
 
 static long iw_remaining(const char *step, long cap)
 {
+    if (iw_interrupted) {
+        printf("INTERRUPTED title=%s step=%s signal=%d\n",
+               iw_title_name ? iw_title_name : "unknown", step,
+               (int)iw_interrupted);
+        return 0;
+    }
     long now = rnf_now_ms();
     long remaining = iw_title_deadline - now;
     if (remaining <= 0) {
@@ -53,9 +60,41 @@ static long iw_remaining(const char *step, long cap)
 
 static void iw_signal(int sig)
 {
-    if (iw_miner_pid > 0) kill(-(pid_t)iw_miner_pid, SIGKILL);
-    if (iw_follower_pid > 0) kill(-(pid_t)iw_follower_pid, SIGKILL);
     iw_interrupted = sig;
+}
+
+static bool iw_reap_until(pid_t pid, long deadline, int *status)
+{
+    while (rnf_now_ms() < deadline) {
+        pid_t got = waitpid(pid, status, WNOHANG);
+        if (got == pid || (got < 0 && errno == ECHILD)) return true;
+        if (got < 0 && errno != EINTR) return false;
+        rnf_sleep_ms(20);
+    }
+    return false;
+}
+
+static bool iw_terminate(pid_t pid, int *status)
+{
+    if (pid <= 0) return true;
+    (void)kill(-pid, SIGTERM);
+    if (iw_reap_until(pid, rnf_now_ms() + 1000, status)) {
+        (void)kill(-pid, SIGKILL);
+        return true;
+    }
+    (void)kill(-pid, SIGKILL);
+    if (iw_reap_until(pid, rnf_now_ms() + 2000, status)) return true;
+    fprintf(stderr, "could not reap process group %ld\n", (long)pid);
+    return false;
+}
+
+static bool iw_cleanup_node(struct rnf *node)
+{
+    if (node->node <= 0) return true;
+    int status = 0;
+    if (!iw_terminate(node->node, &status)) return false;
+    node->node = 0;
+    return true;
 }
 
 static void iw_remove_fixture(struct rnf *node)
@@ -71,17 +110,24 @@ static void iw_remove_fixture(struct rnf *node)
 
 static void iw_cleanup(void)
 {
-    rnf_node_stop(&iw.miner);
+    if (!iw_cleanup_node(&iw.miner)) iw_cleanup_failed = true;
     iw_miner_pid = 0;
-    rnf_node_stop(&iw.follower);
+    if (!iw_cleanup_node(&iw.follower)) iw_cleanup_failed = true;
     iw_follower_pid = 0;
+    if (iw_rpc_pid > 0) {
+        int status = 0;
+        if (!iw_terminate((pid_t)iw_rpc_pid, &status)) iw_cleanup_failed = true;
+        else iw_rpc_pid = 0;
+    }
     if (iw_armed) {
         sigaction(SIGINT, &iw_old_int, NULL);
         sigaction(SIGTERM, &iw_old_term, NULL);
         iw_armed = false;
     }
-    iw_remove_fixture(&iw.miner);
-    iw_remove_fixture(&iw.follower);
+    if (!iw_cleanup_failed) {
+        iw_remove_fixture(&iw.miner);
+        iw_remove_fixture(&iw.follower);
+    }
 }
 
 static void iw_arm(void)
@@ -196,6 +242,7 @@ static void iw_node_child(const struct rnf *e, uint16_t peer, pid_t parent)
 
 static bool iw_start(struct rnf *e, uint16_t peer, volatile sig_atomic_t *slot)
 {
+    if (iw_remaining("start node", 1) == 0) return false;
     pid_t parent = getpid();
     pid_t pid = fork();
     if (pid < 0) return false;
@@ -206,8 +253,11 @@ static bool iw_start(struct rnf *e, uint16_t peer, volatile sig_atomic_t *slot)
     return true;
 }
 
-static void iw_exec_child(const struct rnf *e, const char *const *words, int *p)
+static void iw_exec_child(const struct rnf *e, const char *const *words, int *p,
+                          pid_t parent)
 {
+    if (!rnf_child_die_with_parent(parent)) _exit(127);
+    (void)setpgid(0, 0);
     if (iw_hang_for_test) {
         sleep(2); /* real-clock: deliberately stalled child for deadline test */
         _exit(0);
@@ -235,13 +285,12 @@ static int iw_wait_child(pid_t pid, long deadline)
     while (rnf_now_ms() < deadline) {
         pid_t got = waitpid(pid, &status, WNOHANG);
         if (got == pid) return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-        if (got < 0) return -1;
+        if (got < 0 && errno != EINTR) return -1;
         if (iw_interrupted) break;
         rnf_sleep_ms(50);
     }
     printf("RPC deadline expired, terminating pid %ld\n", (long)pid);
-    kill(pid, SIGKILL);
-    (void)waitpid(pid, &status, 0);
+    if (!iw_terminate(pid, &status)) iw_cleanup_failed = true;
     return -1;
 }
 
@@ -254,15 +303,20 @@ static int iw_call(struct rnf *e, const char *const *words)
     printf("RPC %s waiting\n", words[0]);
     fflush(stdout);
     if (pipe(p) != 0) return -1;
+    pid_t parent = getpid();
     pid_t pid = fork();
     if (pid < 0) { close(p[0]); close(p[1]); return -1; }
-    if (pid == 0) iw_exec_child(e, words, p);
+    if (pid == 0) iw_exec_child(e, words, p, parent);
+    (void)setpgid(pid, pid);
+    iw_rpc_pid = pid;
     close(p[1]);
     /* real-clock: bound the external RPC and report its reply or timeout. */
     long deadline = rnf_now_ms() + remaining;
     rnf_read_until(p[0], iw.raw, sizeof(iw.raw), deadline);
     close(p[0]);
     int rc = iw_wait_child(pid, deadline);
+    (void)kill(-pid, SIGKILL);
+    if (!iw_cleanup_failed) iw_rpc_pid = 0;
     if (rc != 0) (void)iw_remaining(words[0], IW_CMD_MS);
     printf("RPC %s rc=%d raw:\n%s\n", words[0], rc, iw.raw);
     fflush(stdout);
@@ -271,7 +325,7 @@ static int iw_call(struct rnf *e, const char *const *words)
 
 static bool iw_clean_reply(int rc)
 {
-    return rc == 0 && strstr(iw.raw, "error") == NULL &&
+    return !iw_interrupted && rc == 0 && strstr(iw.raw, "error") == NULL &&
            strstr(iw.raw, "Error") == NULL;
 }
 
@@ -373,8 +427,11 @@ static bool iw_stop(struct rnf *node, volatile sig_atomic_t *slot)
     long remaining = iw_remaining("stop", 60000L);
     long deadline = rnf_now_ms() + remaining;
     int rc = iw_wait_child(pid, deadline);
-    node->node = 0;
-    *slot = 0;
+    (void)kill(-pid, SIGKILL);
+    if (!iw_cleanup_failed) {
+        node->node = 0;
+        *slot = 0;
+    }
     printf("node clean-stop exit=%d\n", rc);
     return rc == 0;
 }
@@ -602,6 +659,46 @@ static int iw_test_rpc_deadline(void)
     return failures;
 }
 
+static int iw_test_signal_flag_only(void)
+{
+    int failures = 0;
+    TEST("interrupt handler leaves child cleanup to main flow") {
+        int ready[2];
+        ASSERT(pipe(ready) == 0);
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0) {
+            close(ready[0]);
+            (void)setpgid(0, 0);
+            (void)signal(SIGTERM, SIG_IGN);
+            (void)write(ready[1], "R", 1);
+            for (;;) pause();
+        }
+        (void)setpgid(pid, pid);
+        close(ready[1]);
+        char byte;
+        bool started = read(ready[0], &byte, 1) == 1;
+        close(ready[0]);
+        iw_miner_pid = pid;
+        iw_signal(SIGTERM);
+        rnf_sleep_ms(100); /* real-clock: allow the old handler's kill to land */
+        int status = 0;
+        bool alive = waitpid(pid, &status, WNOHANG) == 0;
+        bool reaped = !alive || iw_terminate(pid, &status);
+        iw_miner_pid = 0;
+        bool flagged = iw_interrupted == SIGTERM;
+        bool refuses_success = !iw_clean_reply(0) &&
+                               iw_remaining("interrupt test", 1) == 0;
+        iw_interrupted = 0;
+        printf("INTERRUPT_TEST alive=%d reaped=%d killed=%d\n", alive, reaped,
+               WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+        ASSERT(started && flagged && alive && reaped && refuses_success &&
+               WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_ironwood_node_e2e(void);
 int test_ironwood_node_e2e(void)
 {
@@ -613,6 +710,7 @@ int test_ironwood_node_e2e(void)
     int failures = iw_test_failed_setup_cleanup();
     failures += iw_test_quoted_cleanup();
     failures += iw_test_rpc_deadline();
+    failures += iw_test_signal_flag_only();
     if (failures) return failures;
     atexit(iw_cleanup);
     iw_arm();
@@ -621,6 +719,6 @@ int test_ironwood_node_e2e(void)
         iw_arm();
         failures += iw_run_profile(true);
     }
-    if (iw_cleanup_failed) failures++;
+    if (iw_interrupted || iw_cleanup_failed) failures++;
     return failures;
 }
