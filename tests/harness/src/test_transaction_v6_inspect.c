@@ -763,6 +763,14 @@ static bool eval_refusals(const struct ironwood_postnu63_stage *stage, uint8_t *
     return ok;
 }
 
+static bool eval_offsets_match(const struct ironwood_postnu63_stage *stage, const size_t o[7], size_t end)
+{
+    return stage->instance_eval_offset == o[0] && stage->advice_eval_offset == o[1] &&
+        stage->fixed_eval_offset == o[2] && stage->random_eval_offset == o[3] &&
+        stage->sigma_eval_offset == o[4] && stage->permutation_eval_offset == o[5] &&
+        stage->lookup_eval_offset == o[6] && stage->proof.position == end;
+}
+
 /* Upstream 0.4.0 PostNu6_3 one/two-action opening aggregation x1. */
 static bool check_eval_stage(struct ironwood_postnu63_stage *stage, uint8_t *wire)
 {
@@ -778,10 +786,7 @@ static bool check_eval_stage(struct ironwood_postnu63_stage *stage, uint8_t *wir
     uint8_t expected[32];
     if (!zcl_hex_decode(x1[n - 1], expected, 32) || !eval_refusals(stage, wire, o, end, expected) ||
         !ironwood_postnu63_evaluations(stage).ok) return false;
-    if (stage->instance_eval_offset != o[0] || stage->advice_eval_offset != o[1] ||
-        stage->fixed_eval_offset != o[2] || stage->random_eval_offset != o[3] ||
-        stage->sigma_eval_offset != o[4] || stage->permutation_eval_offset != o[5] ||
-        stage->lookup_eval_offset != o[6] || stage->proof.position != end || memcmp(stage->x1, expected, 32))
+    if (!eval_offsets_match(stage, o, end) || memcmp(stage->x1, expected, 32))
         return false;
     struct ironwood_postnu63_stage before;
     memcpy(&before, stage, sizeof before);
