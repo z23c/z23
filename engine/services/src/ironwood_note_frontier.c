@@ -2,6 +2,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_note_frontier.h"
 #include "ironwood_pasta_internal.h"
+#include "base/serialize_le.h"
 #include <string.h>
 
 #define NOTE_CAPACITY (UINT64_C(1) << IRONWOOD_NOTE_TREE_DEPTH)
@@ -72,5 +73,60 @@ struct zcl_result ironwood_note_frontier_extend(struct ironwood_note_frontier *f
     if (!r.ok) return r;
     *frontier = next;
     memcpy(anchor, root, sizeof root);
+    return ZCL_OK;
+}
+
+static size_t frontier_storage_size(uint64_t count)
+{
+    size_t size = 9;
+    for (; count; count &= count - 1)
+        size += 32;
+    return size;
+}
+
+struct zcl_result ironwood_frontier_encode(const struct ironwood_note_frontier *tree,
+    uint8_t *bytes, size_t capacity, size_t *written)
+{
+    if (!tree || !bytes || !written || tree->count > NOTE_CAPACITY)
+        return ZCL_ERR(-1, "Invalid Ironwood frontier to encode");
+    size_t size = frontier_storage_size(tree->count);
+    if (size > capacity) return ZCL_ERR(-1, "Short Ironwood frontier buffer");
+    uint8_t frame[IRONWOOD_FRONTIER_STORAGE_MAX];
+    frame[0] = 1;
+    zcl_write_u64_le(frame + 1, tree->count);
+    size_t offset = 9;
+    for (unsigned i = 0; i <= IRONWOOD_NOTE_TREE_DEPTH; ++i) {
+        if (!((tree->count >> i) & 1)) continue;
+        struct zcl_result r = ironwood_pasta_fp_canonical(tree->slots[i]);
+        if (!r.ok) return r;
+        memcpy(frame + offset, tree->slots[i], 32);
+        offset += 32;
+    }
+    memcpy(bytes, frame, size);
+    *written = size;
+    return ZCL_OK;
+}
+
+struct zcl_result ironwood_frontier_restore(const uint8_t *bytes, size_t size,
+    uint64_t expected_count, const uint8_t expected_root[32], const uint8_t *parameters,
+    size_t parameters_size, struct ironwood_note_frontier *out)
+{
+    if (!bytes || !out || !expected_root || !parameters || expected_count > NOTE_CAPACITY ||
+        size != frontier_storage_size(expected_count) || bytes[0] != 1 ||
+        zcl_read_u64_le(bytes + 1) != expected_count)
+        return ZCL_ERR(-1, "Invalid Ironwood frontier record or leaf count");
+    struct ironwood_note_frontier next = {.count = expected_count};
+    size_t offset = 9;
+    for (unsigned i = 0; i <= IRONWOOD_NOTE_TREE_DEPTH; ++i) {
+        if (!((expected_count >> i) & 1)) continue;
+        memcpy(next.slots[i], bytes + offset, 32);
+        offset += 32;
+    }
+    uint8_t root[32];
+    struct zcl_result r = frontier_root(&next, parameters, parameters_size, root);
+    if (!r.ok) return r;
+    if (memcmp(root, expected_root, sizeof root))
+        return ZCL_ERR(-1, "Ironwood frontier does not match expected anchor");
+    *out = next;
     return ZCL_OK;
 }
