@@ -1,6 +1,7 @@
 /* purpose: Compare Ironwood frontier transitions with Orchard 0.16 anchors. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_note_frontier.h"
+#include "services/ironwood_resident_params.h"
 #include "base/hex.h"
 #include <stdio.h>
 #include <string.h>
@@ -135,11 +136,10 @@ static bool capacity(const uint8_t *params)
 
 int test_ironwood_note_frontier(void)
 {
-    uint8_t params[IRONWOOD_MERKLE_PARAMETERS_SIZE], leaves[4][32];
-    FILE *f = fopen("tests/fixtures/ironwood/sinsemilla-merkle-parameters.bin", "rb");
-    if (!f) return 1;
-    bool ok = fread(params, 1, sizeof params, f) == sizeof params && fgetc(f) == EOF && !ferror(f);
-    if (fclose(f) != 0 || !ok) return 1;
+    uint8_t leaves[4][32];
+    size_t size = 0;
+    const uint8_t *params = ironwood_resident_merkle_parameters(&size);
+    if (!params || size != IRONWOOD_MERKLE_PARAMETERS_SIZE) return 1;
     if (!zcl_hex_decode("7bd7041a794980ac3d8c413946d9a58e2b70de01ad27bfe18959f63d90e2b31a", leaves[0], 32) ||
         !zcl_hex_decode("72d98fa009f5a73de8e05e9e25744cf6518f503881b1ed4056ae4fe176120f04", leaves[1], 32)) return 1;
     memcpy(leaves + 2, leaves, 64);
