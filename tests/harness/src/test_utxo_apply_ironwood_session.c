@@ -82,11 +82,16 @@ static enum utxo_ironwood_result session_prepare(struct session_fixture *f, int 
     return utxo_ironwood_session_prepare(f->db, &f->index[height], &f->bodies[height],
         session_reader, NULL, f, pending);
 }
+static bool rollback_first(struct session_fixture *f)
+{
+    struct utxo_ironwood_pending p;
+    return sql(f->db, "BEGIN") && session_prepare(f, 1, &p) == UTXO_IRONWOOD_OK &&
+        p.checkpoint.count == 2 && utxo_ironwood_session_publish(&p) && sql(f->db, "ROLLBACK");
+}
 static bool first_transaction(struct session_fixture *f)
 {
     struct utxo_ironwood_pending p;
-    if (!sql(f->db, "BEGIN") || session_prepare(f, 1, &p) != UTXO_IRONWOOD_OK ||
-        p.checkpoint.count != 2 || !utxo_ironwood_session_publish(&p) || !sql(f->db, "ROLLBACK")) return false;
+    if (!rollback_first(f)) return false;
     if (!sql(f->db, "BEGIN") || ironwood_checkpoint_probe(f->db) != IRONWOOD_CHECKPOINT_UNINITIALIZED ||
         session_prepare(f, 1, &p) != UTXO_IRONWOOD_OK || !utxo_ironwood_session_publish(&p) ||
         !sql(f->db, "COMMIT")) return false;
