@@ -388,7 +388,8 @@ enum { DISK_WINDOW_PARENT = 124, DISK_ABOVE_WINDOW = 399 };
 /* File the window's base and its window the way a selected research node
  * does: under the profile's frame magic, where the index records them. */
 static bool disk_write_window(struct fixture *f, const char *dir,
-                              struct disk_block_pos *first)
+                               struct disk_block_pos *first,
+                               struct disk_block_pos *window)
 {
     for (int h = f->pin.start - 1; h < f->pin.start + f->pin.window; ++h) {
         struct disk_block_pos pos;
@@ -399,12 +400,13 @@ static bool disk_write_window(struct fixture *f, const char *dir,
         block_index_disk_pos_store(&f->index[h], pos.nFile, pos.nPos);
         (void)block_index_status_fetch_or(&f->index[h], BLOCK_HAVE_DATA);
         if (h == f->pin.start - 1) *first = pos;
+        if (h == f->pin.start) *window = pos;
     }
     return true;
 }
 
 /* Every window body on disk: the window decides, later bodies are never
- * opened, and no binding leaves every rule inactive. */
+ * opened, and no binding or no parent leaves every rule inactive. */
 static int disk_resolve_checks(struct fixture *f, const char *dir)
 {
     struct research_rules_state state = {0};
@@ -414,44 +416,78 @@ static int disk_resolve_checks(struct fixture *f, const char *dir)
     /* Bodies above the window are never opened: the index links them. */
     CHECK(research_rules_for_index(&f->binding, &f->index[DISK_ABOVE_WINDOW], dir,
                                    &state).ok && state.active[0]);
+    /* Both rules set beforehand: with no binding, and with no parent, the
+     * resolver writes every rule inactive. */
+    state = (struct research_rules_state){ .active = {true, true} };
     CHECK(research_rules_for_index(NULL, &f->index[DISK_WINDOW_PARENT], dir,
                                    &state).ok);
+    CHECK(!state.active[0] && !state.active[1]);
+    state = (struct research_rules_state){ .active = {true, true} };
+    CHECK(research_rules_for_index(&f->binding, NULL, dir, &state).ok);
     CHECK(!state.active[0] && !state.active[1]);
     return 0;
 }
 
-/* The window's base removed from disk: the outcome is UNAVAILABLE and, as
- * the header promises, a failure leaves the output untouched. */
-static int disk_hold_checks(struct fixture *f, const char *dir)
+/* One byte of a filed window block's header changed in place: the frame
+ * still reads, but the body no longer hashes to its index entry. */
+static bool disk_tamper(const char *dir, const struct disk_block_pos *pos)
 {
-    struct research_rules_state state = {0};
-    state.active[0] = true;
+    char path[PATH_MAX];
+    get_block_pos_filename(path, sizeof(path), dir, pos, "blk");
+    FILE *file = fopen(path, "r+b");
+    if (!file) return false;
+    unsigned char byte = 0;
+    /* Past the frame's magic and size, the header's nonce begins at 68. */
+    bool ok = fseek(file, (long)pos->nPos + 8 + 68, SEEK_SET) == 0 &&
+              fread(&byte, 1, 1, file) == 1 && fseek(file, -1, SEEK_CUR) == 0 &&
+              fputc(byte ^ 1, file) != EOF;
+    return fclose(file) == 0 && ok;
+}
+
+/* Every way a filed window fails to resolve: a body that no longer hashes
+ * to its index entry, the file gone, no directory, an empty one. The
+ * outcome is UNAVAILABLE or INVALID and, as the header promises, a failure
+ * leaves the output untouched, both flags of it. */
+static int disk_hold_checks(struct fixture *f, const char *dir, const char *base,
+                            const struct disk_block_pos *window)
+{
+    struct research_rules_state state = { .active = {true, true} };
+    CHECK(disk_tamper(dir, window));
     CHECK(research_rules_for_index(&f->binding, &f->index[DISK_WINDOW_PARENT], dir,
                                    &state).code == RESEARCH_RULES_UNAVAILABLE);
-    CHECK(state.active[0]);
+    CHECK(state.active[0] && state.active[1]);
+    CHECK(unlink(base) == 0);
+    state = (struct research_rules_state){ .active = {true, true} };
+    CHECK(research_rules_for_index(&f->binding, &f->index[DISK_WINDOW_PARENT], dir,
+                                   &state).code == RESEARCH_RULES_UNAVAILABLE);
+    CHECK(state.active[0] && state.active[1]);
+    state = (struct research_rules_state){ .active = {true, true} };
     CHECK(research_rules_for_index(&f->binding, &f->index[DISK_WINDOW_PARENT], NULL,
                                    &state).code == RESEARCH_RULES_INVALID);
+    CHECK(state.active[0] && state.active[1]);
+    state = (struct research_rules_state){ .active = {true, true} };
     CHECK(research_rules_for_index(&f->binding, &f->index[DISK_WINDOW_PARENT], "",
                                    &state).code == RESEARCH_RULES_INVALID);
-    CHECK(state.active[0]);
+    CHECK(state.active[0] && state.active[1]);
     return 0;
 }
 
 static int disk_check(struct fixture *f)
 {
     char raw[PATH_MAX], dir[PATH_MAX], base[PATH_MAX];
-    struct disk_block_pos first;
+    struct disk_block_pos first, window;
     disk_block_pos_init(&first);
+    disk_block_pos_init(&window);
     /* The node's reader accepts the frame magic of the SELECTED profile, so
      * the fixture selects what a research node runs. */
     CHECK(chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
     test_make_tmpdir(raw, sizeof(raw), "research_rules", "blocks");
     int failures = !platform_directory_canonical_real(raw, dir, sizeof(dir));
-    if (!failures) failures = !disk_write_window(f, dir, &first);
+    if (!failures) failures = !disk_write_window(f, dir, &first, &window);
     if (!failures) failures = disk_resolve_checks(f, dir);
     if (!failures) {
         get_block_pos_filename(base, sizeof(base), dir, &first, "blk");
-        failures = unlink(base) != 0 || disk_hold_checks(f, dir);
+        failures = disk_hold_checks(f, dir, base, &window);
     }
     /* The harness starts every test process on the main network. */
     chain_params_select(CHAIN_MAIN);
@@ -460,13 +496,18 @@ static int disk_check(struct fixture *f)
 
 int test_research_rules(void)
 {
-    struct fixture f = {0};
+    /* The binding installed near the end is once per process and points at
+     * this fixture's pin, so the fixture lives as long as the process. */
+    static struct fixture f;
+    memset(&f, 0, sizeof f);
     CHECK(pin_init(&f, 103, 20, 125, 126, 2));
     CHECK(fixture_blocks(&f, 19, 18));
     struct research_rules_state s = { .active = {true, true} };
     CHECK(research_rules_for_parent(NULL, &f.index[124], read_block, &f, &s).ok);
     CHECK(!s.active[0] && !s.active[1] && !f.calls);
+    s = (struct research_rules_state){ .active = {true, true} };
     CHECK(research_rules_for_parent(&f.binding, NULL, read_block, &f, &s).ok && !f.calls);
+    CHECK(!s.active[0] && !s.active[1]);
     CHECK(expect_state(&f, 123, false, false) == 0 && !f.calls);
     CHECK(expect_state(&f, 124, true, false) == 0);
     CHECK(expect_state(&f, 125, true, false) == 0);
@@ -497,5 +538,9 @@ int test_research_rules(void)
     CHECK(research_rules_binding()->params == f.binding.params && research_rules_binding()->pin == &f.pin);
     CHECK(!research_rules_install(f.binding.params, &f.pin));
     fixture_free(&f);
+    /* The pin outlives this call: the installed binding reads it for the
+     * life of the process. Only the arrays die here. */
+    f.blocks = NULL;
+    f.index = NULL;
     return 0;
 }
