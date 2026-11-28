@@ -16800,7 +16800,7 @@ check-shell-host-assumptions: $(LINTC_TOOL) $(JSONQ_BIN) $(DEV_PACKAGE_VERIFY_BI
 	@echo "══ LINT: Linux/GNU shell assumptions only shrink ══"
 	@./build/bin/z23-lint check-shell-host-assumptions --selftest
 	@./tools/scripts/port_probe.sh --selftest
-	@env CC=/usr/bin/cc ./tools/scripts/commons_fix_admit.sh --selftest
+	@env CC="$${COMMONS_SELFTEST_CC:-$$(command -v gcc-14 || command -v cc)}" ./tools/scripts/commons_fix_admit.sh --selftest
 	@$(BIN_DIR)/isolated-readiness-selftest
 	@$(BIN_DIR)/service-args --selftest
 	@bash tools/scripts/two_node_peer_tip_selftest.sh
