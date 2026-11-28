@@ -5255,6 +5255,7 @@ static bool dp_zcc_init(struct dp_zcc_fx *z)
     return dp_ar_init(z->root) &&
            platform_directory_canonical_real(z->root, z->abs,
                                              sizeof(z->abs)) &&
+           dp_mk_write(z->root, "build/fx-as-v2.ran", "") &&
            dp_zcc_install(z) && dp_zcc_flags(z) &&
            dp_zcc_write_as(z, false) &&
            snprintf(path, sizeof(path), "%s/fx-bin:%s", z->abs, z->path0) <
@@ -5295,13 +5296,24 @@ static void dp_zcc_restore(const struct dp_zcc_fx *z)
     test_rm_rf_recursive(z->cache);
 }
 
+static bool dp_zcc_marker_size(const struct dp_zcc_fx *z, bool nonempty)
+{
+    char path[PATH_MAX];
+    struct stat st;
+    return snprintf(path, sizeof(path), "%s/build/fx-as-v2.ran", z->abs) <
+               (int)sizeof(path) &&
+           stat(path, &st) == 0 && S_ISREG(st.st_mode) &&
+           (nonempty ? st.st_size > 0 : st.st_size == 0);
+}
+
 /* Cold build with the v1 assembler, then the v2 swap: both keyed. */
 [[maybe_unused]] static bool dp_zcc_swap(struct dp_zcc_fx *z,
                         struct zcl_devloop_hotswap_build_receipt *r1,
                         struct zcl_devloop_hotswap_build_receipt *r2)
 {
     return dp_zcc_init(z) && dp_zcc_save(z, r1) &&
-           r1->cache_key_action_root[0] && dp_zcc_write_as(z, true) &&
+           r1->cache_key_action_root[0] && dp_zcc_marker_size(z, false) &&
+           dp_zcc_write_as(z, true) &&
            dp_zcc_save(z, r2) && r2->cache_key_action_root[0];
 }
 
@@ -5311,15 +5323,12 @@ static void dp_zcc_restore(const struct dp_zcc_fx *z)
                            const struct zcl_devloop_hotswap_build_receipt *r1,
                            const struct zcl_devloop_hotswap_build_receipt *r2)
 {
-    char mark[PATH_MAX];
     bool moved = strcmp(r1->cache_key_action_root,
                         r2->cache_key_action_root) != 0;
     bool rebuilt = !r2->artifact_cache_hit && r2->compiler_processes > 0 &&
                    strcmp(r1->candidate_object_sha256,
                           r2->candidate_object_sha256) != 0;
-    bool ran = snprintf(mark, sizeof(mark), "%s/build/fx-as-v2.ran",
-                        z->abs) < (int)sizeof(mark) &&
-               access(mark, F_OK) == 0;
+    bool ran = dp_zcc_marker_size(z, true);
     bool ok = moved && rebuilt && ran;
     printf("    zcc: assembler swap under %s cc: root_moved=%s "
            "object_rebuilt=%s new_as_ran=%s object=%.12s->%.12s -> %s\n",
