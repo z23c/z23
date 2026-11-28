@@ -544,7 +544,16 @@ static void test_toolchain_directory_binding(struct fx *x)
     x->req.toolchain_root_count = 1;
     struct zcl_action_root_result result = {0};
     ok = ok && fx_derive(x, &result);
+    char first[65];
+    (void)snprintf(first, sizeof(first), "%s", result.root_hex);
     zcl_action_root_result_free(&result);
+    raw_dirs[0] = include;
+    ok = ok && fx_derive(x, &result) && strcmp(first, result.root_hex) != 0;
+    zcl_action_root_result_free(&result);
+    raw_dirs[0] = raw;
+    x->req.system_dirs = NULL;
+    ok = ok && fx_miss(x, "request_incomplete");
+    x->req.system_dirs = x->system_dirs;
     ok = ok && rmdir(bin) == 0 && symlink("include", bin) == 0 &&
          fx_miss(x, "builtin_dir_noncanonical");
     x->req.system_dirs_raw = NULL;

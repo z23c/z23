@@ -179,11 +179,6 @@ static bool ar_system_path(const char *abs)
     return false;
 }
 
-/* True when `abs` lies under one of the plan's toolchain roots
- * (request.toolchain_roots): the install tree of a driver the plan names
- * outside the checkout and the system prefixes. It is bound by its exact
- * spelling, as a system path is. `abs` need only carry the root as a
- * whole leading path segment. */
 static bool ar_delim(char c)
 {
     return c == '\0' || strchr("/=,:; \"'", c) != NULL;
@@ -198,6 +193,7 @@ struct ar_ctx {
     size_t miss_len;
 };
 
+/* Match a whole leading path segment of a bound toolchain root. */
 static bool ar_toolchain_path(const struct ar_ctx *c, const char *abs)
 {
     const struct zcl_action_root_request *req = c->req;
@@ -1227,6 +1223,10 @@ static bool ar_builtin_dirs_canonical(struct ar_state *s)
 static bool ar_search_build(struct ar_state *s)
 {
     const struct zcl_action_root_request *req = s->c.req;
+    if (req->system_dirs_raw && req->system_dir_count && !req->system_dirs) {
+        ar_fail(&s->c, "request_incomplete", "builtin directory list missing", NULL);
+        return false;
+    }
     for (size_t i = 0; req->system_dirs_raw && i < req->system_dir_count; i++) {
         char norm[PATH_MAX];
         if (!req->system_dirs[i] || !req->system_dirs_raw[i] ||
@@ -2280,6 +2280,17 @@ static void ar_preimage_fill(const struct ar_state *s,
         .policy = req->policy,
     };
     memcpy(p->toolchain_root, req->toolchain_root, 32);
+    if (req->system_dirs_raw) {
+        static const char domain[] = "zcl.action_root.raw_builtin_dirs.v1";
+        struct sha3_256_ctx sha;
+        sha3_256_init(&sha);
+        sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+        sha3_256_write(&sha, req->toolchain_root, 32);
+        for (size_t i = 0; i < req->system_dir_count; i++)
+            sha3_256_write(&sha, (const uint8_t *)req->system_dirs_raw[i],
+                           strlen(req->system_dirs_raw[i]) + 1);
+        sha3_256_finalize(&sha, p->toolchain_root);
+    }
     p->sysroot = (struct vcs_action_sysroot_v2){
         .sysroot = s->sysroot[0] ? s->sysroot : NULL,
         .builtin_dirs = (const char *const *)s->builtin.v,
