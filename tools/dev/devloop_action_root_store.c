@@ -758,53 +758,60 @@ static int ars_cc1_next_word(const char **cursor, const char *end,
     return 1;
 }
 
+struct ars_cc1_state {
+    bool pending, found, triple_pending, triple_found, linux_target, cc1;
+};
+
+static bool ars_cc1_linux_triple(const char *word)
+{
+    const char *arch = strchr(word, '-');
+    const char *vendor = arch ? strchr(arch + 1, '-') : NULL;
+    return arch && arch != word && vendor && vendor != arch + 1 &&
+           strncmp(vendor + 1, "linux-", 6) == 0 && vendor[7] != '\0';
+}
+
+static bool ars_cc1_word(struct ars_cc1_state *s, const char *word,
+                         char path[PATH_MAX])
+{
+    if (s->triple_pending) {
+        if (s->triple_found) return false;
+        s->triple_found = true;
+        s->linux_target = ars_cc1_linux_triple(word);
+        s->triple_pending = false;
+    } else if (s->pending) {
+        if (s->found || word[0] != '/') return false;
+        (void)snprintf(path, PATH_MAX, "%s", word);
+        s->pending = false;
+        s->found = true;
+    } else if (strcmp(word, "-isysroot") == 0) {
+        if (s->found) return false;
+        s->pending = true;
+    } else if (strncmp(word, "-isysroot", 9) == 0 ||
+               strncmp(word, "--sysroot", 9) == 0) {
+        return false;
+    } else if (strcmp(word, "-cc1") == 0) {
+        if (s->cc1) return false;
+        s->cc1 = true;
+    } else if (strcmp(word, "-triple") == 0) {
+        if (s->triple_found) return false;
+        s->triple_pending = true;
+    }
+    return true;
+}
+
 static bool ars_cc1_line_sysroot(const char *line, const char *end,
                                 char path[PATH_MAX], bool *cc1)
 {
     const char *p = line;
-    bool pending = false, found = false, triple_pending = false;
-    bool triple_found = false, linux_target = false;
-    *cc1 = false;
+    struct ars_cc1_state state = {0};
     path[0] = '\0';
     char word[PATH_MAX];
     int step;
-    while ((step = ars_cc1_next_word(&p, end, word)) > 0) {
-        if (triple_pending) {
-            if (triple_found)
-                return false;
-            triple_found = true;
-            const char *arch_end = strchr(word, '-');
-            const char *vendor_end = arch_end ? strchr(arch_end + 1, '-') : NULL;
-            linux_target = arch_end && arch_end != word && vendor_end &&
-                           vendor_end != arch_end + 1 &&
-                           strncmp(vendor_end + 1, "linux-", 6) == 0 &&
-                           vendor_end[7] != '\0';
-            triple_pending = false;
-        } else if (pending) {
-            if (found || word[0] != '/')
-                return false;
-            (void)snprintf(path, PATH_MAX, "%s", word);
-            pending = false;
-            found = true;
-        } else if (strcmp(word, "-isysroot") == 0) {
-            if (found)
-                return false;
-            pending = true;
-        } else if (strncmp(word, "-isysroot", 9) == 0 ||
-                   strncmp(word, "--sysroot", 9) == 0) {
-            return false;
-        } else if (strcmp(word, "-cc1") == 0) {
-            if (*cc1)
-                return false;
-            *cc1 = true;
-        } else if (strcmp(word, "-triple") == 0) {
-            if (triple_found)
-                return false;
-            triple_pending = true;
-        }
-    }
-    return step == 0 && !pending && !triple_pending &&
-           (!*cc1 || found || (triple_found && linux_target));
+    while ((step = ars_cc1_next_word(&p, end, word)) > 0)
+        if (!ars_cc1_word(&state, word, path)) return false;
+    *cc1 = state.cc1;
+    return step == 0 && !state.pending && !state.triple_pending &&
+           (!state.cc1 || state.found || (state.triple_found && state.linux_target));
 }
 
 /* Parse only driver command lines. Linux cc1 without -isysroot uses the
@@ -1982,6 +1989,38 @@ static const char *ars_driver_miss_why(const char *code)
 /* The plan's driver facts under the child environment, then the bytes of
  * every program a compile runs. */
 #if !defined(_WIN32)
+static bool ars_exec_direct_link(const char *path, struct stat *st)
+{
+    char target[PATH_MAX], joined[PATH_MAX], norm[PATH_MAX], real[PATH_MAX];
+    ssize_t used = readlink(path, target, sizeof(target) - 1);
+    if (used <= 0 || (size_t)used >= sizeof(target) - 1)
+        return false;
+    target[used] = '\0';
+    const char *slash = strrchr(path, '/');
+    int written = target[0] == '/'
+        ? snprintf(joined, sizeof(joined), "%s", target)
+        : snprintf(joined, sizeof(joined), "%.*s/%s",
+                   (int)(slash - path), path, target);
+    return written >= 0 && written < (int)sizeof(joined) &&
+           zcl_action_root_lex_normalize(joined, norm, sizeof(norm)) &&
+           realpath(joined, real) && strcmp(norm, real) == 0 &&
+           lstat(joined, st) == 0 && !S_ISLNK(st->st_mode) &&
+           lstat(path, st) == 0 && S_ISLNK(st->st_mode);
+}
+
+static bool ars_exec_stamp_stable(const struct stat *st,
+                                  const struct zcl_action_root_t0 *t0)
+{
+    if (!t0 || !t0->set) return true;
+#if defined(__APPLE__)
+    int64_t sec = st->st_ctimespec.tv_sec, nsec = st->st_ctimespec.tv_nsec;
+#else
+    int64_t sec = st->st_ctim.tv_sec, nsec = st->st_ctim.tv_nsec;
+#endif
+    return sec < t0->sec ||
+           (sec == t0->sec && nsec != 0 && nsec < t0->nsec);
+}
+
 static bool ars_exec_path_stable(const char *word,
                                  const struct zcl_action_root_t0 *t0)
 {
@@ -2000,38 +2039,9 @@ static bool ars_exec_path_stable(const char *word,
         path[i] = saved;
         if (!ok)
             return false;
-        if (S_ISLNK(st.st_mode)) {
-            /* Only one final link with a direct, canonical target is
-             * modeled. Intermediate link chains are cache misses. */
-            if (i != n)
-                return false;
-            char target[PATH_MAX], joined[PATH_MAX], norm[PATH_MAX], real[PATH_MAX];
-            ssize_t used = readlink(path, target, sizeof(target) - 1);
-            if (used <= 0 || (size_t)used >= sizeof(target) - 1)
-                return false;
-            target[used] = '\0';
-            const char *slash = strrchr(path, '/');
-            int written = target[0] == '/'
-                ? snprintf(joined, sizeof(joined), "%s", target)
-                : snprintf(joined, sizeof(joined), "%.*s/%s",
-                           (int)(slash - path), path, target);
-            if (written < 0 || written >= (int)sizeof(joined) ||
-                !zcl_action_root_lex_normalize(joined, norm, sizeof(norm)) ||
-                !realpath(joined, real) || strcmp(norm, real) != 0 ||
-                lstat(joined, &st) != 0 || S_ISLNK(st.st_mode))
-                return false;
-            if (lstat(path, &st) != 0 || !S_ISLNK(st.st_mode))
-                return false;
-        }
-        if (!t0 || !t0->set)
-            continue;
-#if defined(__APPLE__)
-        int64_t sec = st.st_ctimespec.tv_sec, nsec = st.st_ctimespec.tv_nsec;
-#else
-        int64_t sec = st.st_ctim.tv_sec, nsec = st.st_ctim.tv_nsec;
-#endif
-        if (sec > t0->sec ||
-            (sec == t0->sec && (nsec >= t0->nsec || nsec == 0)))
+        if (S_ISLNK(st.st_mode) && (i != n || !ars_exec_direct_link(path, &st)))
+            return false;
+        if (!ars_exec_stamp_stable(&st, t0))
             return false;
     }
     return true;

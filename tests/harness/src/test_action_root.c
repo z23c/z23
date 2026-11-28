@@ -2890,6 +2890,20 @@ static void test_builtin_dir_parse(void)
              "parses", ok);
 }
 
+static bool test_cc1_linux_default(void)
+{
+    const char *valid = " \"/tool/clang\" \"-cc1\" \"-triple\" "
+        "\"x86_64-unknown-linux-gnu\" \"-x\" \"c\"\n";
+    const char *duplicate = " \"/tool/clang\" \"-cc1\" \"-triple\" "
+        "\"x86_64-unknown-linux-gnu\" \"-triple\" \"arm64-apple-macos\"\n";
+    const char *vendor = " \"/tool/clang\" \"-cc1\" \"-triple\" "
+        "\"x86_64-linux-darwin-gnu\"\n";
+    char root[PATH_MAX];
+    return zcl_action_root_parse_cc1_sysroot(valid, root) && !root[0] &&
+           !zcl_action_root_parse_cc1_sysroot(duplicate, root) &&
+           !zcl_action_root_parse_cc1_sysroot(vendor, root);
+}
+
 static void test_cc1_sysroot_parse(void)
 {
     const char *valid =
@@ -2904,16 +2918,6 @@ static void test_cc1_sysroot_parse(void)
         "\"-isysroot\" \"/SDK/MacOSX.sdk\"\n";
     const char *missing =
         " \"/tool/clang\" \"-cc1\" \"-x\" \"c\"\n";
-    const char *linux_default =
-        " \"/tool/clang\" \"-cc1\" \"-triple\" "
-        "\"x86_64-unknown-linux-gnu\" \"-x\" \"c\"\n";
-    const char *linux_ambiguous =
-        " \"/tool/clang\" \"-cc1\" \"-triple\" "
-        "\"x86_64-unknown-linux-gnu\" \"-triple\" "
-        "\"arm64-apple-macos\"\n";
-    const char *linux_vendor =
-        " \"/tool/clang\" \"-cc1\" \"-triple\" "
-        "\"x86_64-linux-darwin-gnu\"\n";
     const char *duplicate =
         " \"/tool/clang\" \"-cc1\" \"-isysroot\" \"/SDK/A\" "
         "\"-isysroot\" \"/SDK/B\"\n";
@@ -2934,10 +2938,7 @@ static void test_cc1_sysroot_parse(void)
               strcmp(sysroot, "/SDK/MacOSX.sdk") == 0 &&
               !zcl_action_root_parse_cc1_sysroot(bad_escape, sysroot) &&
               !zcl_action_root_parse_cc1_sysroot(missing, sysroot) &&
-              zcl_action_root_parse_cc1_sysroot(linux_default, sysroot) &&
-              sysroot[0] == '\0' &&
-              !zcl_action_root_parse_cc1_sysroot(linux_ambiguous, sysroot) &&
-              !zcl_action_root_parse_cc1_sysroot(linux_vendor, sysroot) &&
+              test_cc1_linux_default() &&
               !zcl_action_root_parse_cc1_sysroot(duplicate, sysroot) &&
               !zcl_action_root_parse_cc1_sysroot(relative, sysroot) &&
               !zcl_action_root_parse_cc1_sysroot(two_commands, sysroot) &&
@@ -3136,14 +3137,18 @@ static void observation_window_refusals(struct observation_fixture *fixture)
     zcl_compile_observation_close(observation);
     AR_CHECK("observation restores private input", fx_write(fixture->root,
              "inc/defs.h", "#define VALUE 7\n"));
+}
 
+static void observation_driver_refusals(struct observation_fixture *fixture)
+{
+    struct zcl_compile_observation *observation = NULL;
+    struct zcl_action_root_result result = {0};
     char driver[PATH_MAX];
     (void)snprintf(driver, sizeof(driver), "%s/cc", fixture->root);
     bool linked = symlink(fixture->compiler, driver) == 0;
     const char *original = fixture->argv[0];
     fixture->argv[0] = driver;
-    observation = NULL;
-    ready = linked && observation_begin(fixture, &observation) &&
+    bool ready = linked && observation_begin(fixture, &observation) &&
             observation_compile(observation);
     bool replaced = ready && unlink(driver) == 0 && symlink("/usr/bin/false", driver) == 0;
     AR_CHECK("observation refuses compiler replacement during window",
@@ -3166,11 +3171,18 @@ static void observation_window_refusals(struct observation_fixture *fixture)
     zcl_compile_observation_close(observation);
     fixture->argv[0] = original;
     (void)unlink(driver);
+}
 
+static void observation_driver_chain_refusal(struct observation_fixture *fixture)
+{
+    struct zcl_compile_observation *observation = NULL;
+    char driver[PATH_MAX];
+    (void)snprintf(driver, sizeof(driver), "%s/cc", fixture->root);
+    const char *original = fixture->argv[0];
     char intermediate[PATH_MAX];
     (void)snprintf(intermediate, sizeof(intermediate), "%s/cc-link", fixture->root);
-    linked = symlink(fixture->compiler, intermediate) == 0 &&
-             symlink("cc-link", driver) == 0;
+    bool linked = symlink(fixture->compiler, intermediate) == 0 &&
+                  symlink("cc-link", driver) == 0;
     fixture->argv[0] = driver;
     observation = NULL;
     AR_CHECK("observation refuses an intermediate compiler symlink",
@@ -3313,6 +3325,8 @@ static void test_compile_observation(void)
     observation_finish_refusals(&fixture);
     observation_swapped_depfile(&fixture);
     observation_window_refusals(&fixture);
+    observation_driver_refusals(&fixture);
+    observation_driver_chain_refusal(&fixture);
     test_rm_rf_recursive(fixture.root);
 }
 #endif
