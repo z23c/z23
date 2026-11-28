@@ -3,6 +3,7 @@
 #include "base/hex.h"
 #include "services/research_block_size.h"
 #include "primitives/block.h"
+#include "primitives/transaction_v6_decode.h"
 #include "util/safe_alloc.h"
 #include "storage/disk_block_io.h"
 #include "platform/directory_compat.h"
@@ -130,6 +131,32 @@ static int ceiling_test(void)
     zcl_alloc_fault_clear();
     block_free(&b);
     return exact && over && unchanged ? 0 : 1;
+}
+static bool checked_reward_size(void)
+{
+    uint8_t wire[9313];
+    FILE *f = fopen("tests/fixtures/ironwood/postnu63-h1-reward-spend.v6", "rb");
+    if (!f) return false;
+    bool read = fread(wire, 1, sizeof wire, f) == sizeof wire && fgetc(f) == EOF && !ferror(f);
+    fclose(f);
+    if (!read) return false;
+    struct byte_stream input;
+    stream_init_from_data(&input, wire, sizeof wire);
+    struct transaction reward;
+    struct block b;
+    block_init(&b);
+    bool decoded = transaction_v6_decode_prefix(&reward, &input, sizeof wire);
+    b.vtx = &reward;
+    b.num_vtx = 1;
+    /* 140 fixed header bytes, empty solution CompactSize, one tx CompactSize. */
+    size_t exactly = 142 + sizeof wire;
+    bool ok = decoded && !stream_remaining(&input) &&
+        research_block_size_measure(&b, exactly) == RESEARCH_BLOCK_SIZE_OK &&
+        research_block_size_measure(&b, exactly - 1) == RESEARCH_BLOCK_SIZE_EXCEEDED;
+    reward.ironwood_value_balance ^= 1;
+    ok = ok && research_block_size_measure(&b, exactly) == RESEARCH_BLOCK_SIZE_UNAVAILABLE;
+    transaction_free(&reward);
+    return ok;
 }
 static int unwalkable_size_test(void)
 {
@@ -566,7 +593,7 @@ int test_research_rules_gate(void)
         fprintf(stderr, "research rules gate: unbound pass failed\n");
         return 1;
     }
-    int failures = unwalkable_size_test() + ceiling_test();
+    int failures = unwalkable_size_test() + ceiling_test() + !checked_reward_size();
     failures += activation_test();
     const struct research_rules_binding *installed = research_rules_binding();
     const struct miner_signal_catalog_pin *pin = installed ? installed->pin : NULL;

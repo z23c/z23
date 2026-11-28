@@ -8,6 +8,7 @@
 #include "core/uint256.h"
 #include "primitives/block.h"
 #include "services/research_rules.h"
+#include "services/ironwood_checked_wire.h"
 #include "util/safe_alloc.h"
 #include "validation/main_constants.h"
 #include <stdlib.h>
@@ -65,6 +66,23 @@ static inline size_t research_ballot_template_limit(const struct chain_params *p
         : DEFAULT_BLOCK_MAX_SIZE;
 }
 
+/* The sealed legacy serializer intentionally refuses opaque v6 frames. The
+ * private size gate may count a frame only after binding its model and txid. */
+static inline bool research_block_write_for_size(const struct block *block, struct byte_stream *s)
+{
+    if (!block_header_serialize(&block->header, s) ||
+        !stream_write_compact_size(s, block->num_vtx)) return false;
+    for (size_t i = 0; i < block->num_vtx; ++i) {
+        const struct transaction *tx = &block->vtx[i];
+        if (tx->version == IRONWOOD_TX_VERSION || tx->v6_wire.data || tx->v6_wire.size) {
+            struct v6_wire_view view;
+            if (!ironwood_checked_wire(tx, MAX_BLOCK_SIZE, &view).ok ||
+                !stream_write_bytes(s, tx->v6_wire.data, tx->v6_wire.size)) return false;
+        } else if (!transaction_serialize(tx, s)) return false;
+    }
+    return true;
+}
+
 /* Classify `block` against one explicit limit. Only the research limit is
  * measured here (serialized into a fixed-capacity buffer, to bound memory);
  * any other limit is left to the chain's existing validation and
@@ -74,7 +92,7 @@ static inline enum research_block_size_verdict research_block_size_measure(
 {
     if (!limit || limit == SIZE_MAX || !block)
         return RESEARCH_BLOCK_SIZE_UNAVAILABLE;
-    if (block->header.nSolutionSize > MAX_SOLUTION_SIZE ||
+    if (block->header.nSolutionSize > MAX_SOLUTION_SIZE || block->num_vtx > MAX_BLOCK_TRANSACTIONS ||
         (block->num_vtx && !block->vtx))
         return RESEARCH_BLOCK_SIZE_UNAVAILABLE;
     unsigned char *bytes = zcl_malloc(limit + 1, "research block size");
@@ -84,7 +102,7 @@ static inline enum research_block_size_verdict research_block_size_measure(
         .data = bytes, .size = 0, .capacity = limit + 1,
         .read_pos = 0, .error = false, .owns_data = false
     };
-    bool ok = block_serialize(block, &s);
+    bool ok = research_block_write_for_size(block, &s);
     bool exceeded = s.error || s.size > limit;
     free(bytes);
     if (exceeded)
