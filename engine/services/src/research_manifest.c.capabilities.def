@@ -1,0 +1,2 @@
+/* purpose: Declare read access for the private release manifest checksum. */
+ZCL_MODULE_CAPABILITY("engine/services/src/research_manifest.c", CAP_FS_READ, "Reads the release manifest file to compute its SHA3-256 checksum.")
