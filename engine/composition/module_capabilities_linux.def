@@ -26,6 +26,7 @@
 ZCL_MODULE_CAPABILITY("contexts/explorer/views/src/ui_present_host.c", CAP_PROCESS|CAP_CLOCK|CAP_PRIVILEGE|CAP_NETWORK, "hosts the native presentation window: listens on an AF_UNIX socket, spawns the presentation child process, and narrows that child's privileges before handing it the socket")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_memory_guard.c", CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mint_anchor_preflight.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK|CAP_PRIVILEGE, "opens the live kernel db READONLY and sets SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE with sqlite3_db_config before it reads the WAL-aware view; the copy fallback uses no privilege")
+ZCL_MODULE_CAPABILITY_WHEN("ZCL_CC_CLANG", "engine/composition/src/boot_snapshot_offer.c", CAP_NONE, "Clang leaves filesystem reach in called helpers; this object has no direct filesystem reference")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_build_store.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_merkle_snapshot_windows.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/session/src/mesh_terminal_hub_client.c", CAP_FS_READ, "Linux uses MSG_NOSIGNAL in the shared I/O helpers; the client does not set the Darwin SO_NOSIGPIPE socket option")

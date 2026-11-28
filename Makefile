@@ -1258,7 +1258,8 @@ DEVLOOP_INCLUDES = -Itools/dev
 # binary, or the test harness. They must leave the wildcard BEFORE the
 # DEV_ONLY_SRCS split, because DEV_ONLY_SRCS is still linked (into the dev
 # binary) — filtering there would only move the duplicate-`main` link error.
-DEV_STANDALONE_SRCS = tools/dev/ship_lane_guard.c \
+DEV_STANDALONE_SRCS = tools/dev/vendor_compiler_selftest.c \
+	tools/dev/ship_lane_guard.c \
 	tools/dev/ship_lane_guard_main.c \
 	tools/dev/ship_lane_guard_selftest.c \
 	tools/dev/ship_lane_guard_scan_selftest.c \
@@ -1839,6 +1840,8 @@ CFLAGS = -std=$(ZCL_C_STD) -g -O3 $(ZCL_ARCH_CFLAGS) $(ZCL_LTO_FLAG) -Wall -Wext
 	$(ZCL_ALL_INCLUDES) \
 	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -DZCL_AR_ENFORCE $(BUILD_IDENTITY_CPPFLAGS) $(ZCL_VENDOR_INC_FLAGS) -Ivendor/x11/include $(GTK_DEF) $(GTK_CFLAGS) \
 	$(WEBKIT_DEF) $(WEBKIT_CFLAGS)
+CFLAGS += $(if $(ZCL_CC_IS_CLANG),-DZCL_CC_CLANG=1)
+ZCL_CLANG_COMPAT_CFLAGS = $(if $(ZCL_CC_IS_CLANG),-Wno-unused-but-set-global -Wno-error=unknown-warning-option)
 ZCL_EXPORT_DYNAMIC_FLAG = $(if $(filter Darwin,$(ZCL_HOST_OS)),,$(if $(ZCL_HOST_WINDOWS),,-rdynamic))
 ZCL_WINDOWS_CLANG_LINKER = $(if $(and $(ZCL_HOST_WINDOWS),$(ZCL_CC_IS_CLANG)),-fuse-ld=lld,)
 # Linux Clang links LTO with Clang's own linker: the LLVM release archive
@@ -4174,8 +4177,8 @@ TEST_REL_OBJ_ROOT = $(BUILD_DIR)/test-rel-obj
 TEST_REL_CFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(CACHED_CFLAGS)) -DZCL_TESTING \
 	-Wno-deprecated-declarations -Wno-format-truncation -Wno-format-overflow \
 	-Wno-array-bounds $(ZCL_WARN_MAYBE_UNINITIALIZED)
-ifeq ($(ZCL_HOST_OS),Linux)
-# GCC-only suppression spellings; Apple Clang rejects them under -Werror.
+ifeq ($(ZCL_HOST_OS)$(ZCL_CC_IS_CLANG),Linux)
+# GCC-only suppression spellings; Clang rejects them under -Werror.
 TEST_REL_CFLAGS += -Wno-stringop-truncation -Wno-stringop-overread \
 	-Wno-restrict
 endif
@@ -4759,7 +4762,7 @@ $$(BIN_DIR)/$(1): $$(VIEW_GEN_HEADERS) $$(BUILD_IDENTITY_STAMP) \
 	@set -eu; \
 	tmp="$$$$(mktemp "$$@.link.XXXXXX")"; \
 	trap 'rm -f "$$$$tmp"' EXIT HUP INT TERM; \
-	$$(CC) $$(CFLAGS) $(4) -Wno-deprecated-declarations $$(LDFLAGS) -o "$$$$tmp" "@$$(BIN_DIR)/$(1).link.rsp" $$(TOR_LIBS) $$(LIBS) $$(GTK_LIBS) $$(WEBKIT_LIBS) $(3); \
+	$$(CC) $$(CFLAGS) $(4) $(ZCL_CLANG_COMPAT_CFLAGS) -Wno-deprecated-declarations $$(LDFLAGS) -o "$$$$tmp" "@$$(BIN_DIR)/$(1).link.rsp" $$(TOR_LIBS) $$(LIBS) $$(GTK_LIBS) $$(WEBKIT_LIBS) $(3); \
 	tools/dev/source-identity.sh verify-record "$$(BUILD_SOURCE_ID)" "$$(BUILD_CLEAN)" "$$(BUILD_MUTATION)" >/dev/null; \
 	mv -f -- "$$$$tmp" "$$@"; \
 	trap - EXIT HUP INT TERM
@@ -5816,7 +5819,7 @@ check-zcode-package-registry: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(BIN_DIR)/z23
 	@./build/bin/z23-lint check-zcode-package-registry
 .PHONY: check-zcode-package-standalone
 check-zcode-package-standalone: $(BIN_DIR)/z23-lint
-	@build/bin/z23-lint check-zcode-package-standalone
+	@CC='$(or $(ZCL_CC_PROGRAM),cc)' build/bin/z23-lint check-zcode-package-standalone
 .PHONY: check-package-capabilities
 check-package-capabilities: $(BIN_DIR)/z23-lint
 	@./build/bin/z23-lint check-package-capabilities --selftest
@@ -15538,8 +15541,8 @@ check-accel-oracle-pinned: $(LINTC_TOOL)
 # disassembly.
 check-no-adx-overclaim: $(LINTC_TOOL)
 	@echo "══ LINT: no ADCX/ADOX carry-chain overclaim ══"
-	@./build/bin/z23-lint check-no-adx-overclaim --selftest
-	@./build/bin/z23-lint check-no-adx-overclaim
+	@CC='$(or $(ZCL_CC_PROGRAM),cc)' ./build/bin/z23-lint check-no-adx-overclaim --selftest
+	@CC='$(or $(ZCL_CC_PROGRAM),cc)' ./build/bin/z23-lint check-no-adx-overclaim
 	@./build/bin/z23-lint check-asan-adx-exception --selftest
 	@./build/bin/z23-lint check-asan-adx-exception
 
@@ -16003,8 +16006,8 @@ check-fuzz-artifact-ledger: $(LINTC_TOOL)
 # Makefile (fail-closed: a new tool is covered the day it lands).
 check-standalone-tools-link: $(LINTC_TOOL) $(BIN_DIR)/gate_receipt
 	@echo "→ Gate: standalone_tools_link (every tool rule still builds)"
-	@./build/bin/z23-lint check-standalone-tools-link --selftest
-	@./build/bin/z23-lint check-standalone-tools-link
+	@CC='$(or $(ZCL_CC_PROGRAM),cc)' ./build/bin/z23-lint check-standalone-tools-link --selftest
+	@CC='$(or $(ZCL_CC_PROGRAM),cc)' ./build/bin/z23-lint check-standalone-tools-link
 
 # tools/scripts/make_app_bundle.sh must be a pure function of its input: two
 # bundle runs over identical binaries into two temp dirs must be
@@ -16476,10 +16479,10 @@ check-network-tool-hardening: $(LINTC_TOOL) $(NETWORK_TOOL_HARDENING_BINS)
 # before its --report-only argument is removed.
 check-object-reproducible: $(LINTC_TOOL)
 	@echo "══ LINT: objects do not depend on the checkout path ══"
-	@./build/bin/z23-lint check-object-reproducible --selftest && \
-	./build/bin/z23-lint check-object-reproducible --tree-root '$(CURDIR)' \
-		--repro-cflags '$(REPRO_CFLAGS)' --base-cflags '$(REPRO_GATE_BASE_CFLAGS)' \
-		--shipped-cflags '$(NODE_C23_OBJECT_CFLAGS)' \
+	@CC='$(or $(ZCL_CC_PROGRAM),cc)' ./build/bin/z23-lint check-object-reproducible --selftest && \
+	CC='$(or $(ZCL_CC_PROGRAM),cc)' ./build/bin/z23-lint check-object-reproducible --tree-root '$(CURDIR)' \
+		--repro-cflags '$(REPRO_CFLAGS)' --base-cflags '$(REPRO_GATE_BASE_CFLAGS) $(if $(ZCL_CC_IS_CLANG),-ffat-lto-objects)' \
+		--shipped-cflags '$(NODE_C23_OBJECT_CFLAGS) $(if $(ZCL_CC_IS_CLANG),-ffat-lto-objects)' \
 		--link-flags '$(LDFLAGS) -Wl,--build-id=none' --link-libs '$(REPRO_GATE_LINK_LIBS)' \
 		--cross-flags '$(REPRO_GATE_CROSS_FLAGS)' --targets '$(REPRO_GATE_TARGETS)' \
 		--xcc-flags '$(REPRO_GATE_XCC_FLAGS)' --xld '$(REPRO_GATE_XLD)' \
@@ -16729,7 +16732,7 @@ check-ship-remote-transaction: $(LINTC_TOOL) jsonq $(TOR_PROVENANCE_BIN) build/b
 check-z23-release-install: $(Z23_BOOTSTRAP_BIN) $(INSTALL_SELFTEST_BIN)
 	@echo "══ LINT: z23 release package + fail-closed installer ══"
 	@$(INSTALL_SELFTEST_BIN) --selftest
-	@bash platform/packaging/release/build_release.sh --selftest
+	@CC='$(or $(ZCL_CC_PROGRAM),cc)' bash platform/packaging/release/build_release.sh --selftest
 	@bash tools/scripts/install_z23.sh --selftest
 	@bash tools/scripts/deploy_z23_release.sh --selftest
 

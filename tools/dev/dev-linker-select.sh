@@ -47,6 +47,8 @@ if [[ "${1:-}" == --selftest ]]; then
     done <<CASES
 Clang takes lld|$work/bin/clang|-fuse-ld=lld
 a compile-cache wrapper is not the compiler|$work/bin/zcc $work/bin/clang|-fuse-ld=lld
+env assignments select the compiler|env FOO=bar $work/bin/clang|-fuse-ld=lld
+env and a cache wrapper select the compiler|env ccache $work/bin/clang|-fuse-ld=lld
 a versioned Clang driver takes lld|$work/bin/clang-23|-fuse-ld=lld
 a triple-prefixed Clang driver takes lld|$work/bin/aarch64-linux-gnu-clang|-fuse-ld=lld
 Clang with no lld selects nothing|$work/bin/clang-none|
@@ -60,10 +62,20 @@ CASES
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-# The last word is the compiler; a compile-cache wrapper may precede it.
+# Unwrap compile launchers and env assignments; compiler options follow the driver.
 CC="${CC:-}"
-CC="${CC##* }"
-CC="${CC:-cc}"
+set -- $CC
+while [ "$#" -gt 0 ]; do
+    case "${1##*/}" in
+        env)
+            shift
+            while [ "$#" -gt 0 ] && [[ "$1" == *=* ]]; do shift; done
+            ;;
+        zcc|ccache|sccache) shift ;;
+        *) break ;;
+    esac
+done
+CC="${1:-cc}"
 
 probe_fuse_ld()
 {
@@ -78,7 +90,7 @@ probe_fuse_ld()
     return 1
 }
 
-case "$(basename -- "${CC##* }")" in
+case "$(basename -- "$CC")" in
     *clang*)
         if probe_fuse_ld lld; then
             printf '%s' '-fuse-ld=lld'

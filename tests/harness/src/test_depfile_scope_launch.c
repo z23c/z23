@@ -219,6 +219,137 @@ static int test_depfile_scope_linker(const char *root, const char *bins)
     return failures;
 }
 
+static bool dsl_selector_script(const char *root)
+{
+    char path[512], body[16384];
+    FILE *in = fopen("tools/dev/dev-linker-select.sh", "rb");
+    if (!in) return false;
+    size_t n = fread(body, 1, sizeof body, in);
+    bool ok = !ferror(in) && feof(in);
+    if (fclose(in) != 0) ok = false;
+    if (snprintf(path, sizeof path, "%s/tools", root) >= (int)sizeof path ||
+        !dsl_dir(path)) return false;
+    if (snprintf(path, sizeof path, "%s/tools/dev", root) >= (int)sizeof path ||
+        !dsl_dir(path)) return false;
+    if (snprintf(path, sizeof path, "%s/tools/dev/dev-linker-select.sh", root) >=
+        (int)sizeof path) return false;
+    FILE *out = fopen(path, "wb");
+    if (!out) return false;
+    ok = ok && fwrite(body, 1, n, out) == n;
+    if (fclose(out) != 0) ok = false;
+    if (chmod(path, 0755) != 0) ok = false;
+    return ok && n > 0;
+}
+
+static bool dsl_fake_compiler(const char *bins, const char *name, const char *accept)
+{
+    char path[512], body[1024];
+    if (snprintf(path, sizeof path, "%s/%s", bins, name) >= (int)sizeof path) return false;
+    int n = snprintf(body, sizeof body,
+        "#!/bin/sh\n"
+        "for argument in \"$@\"; do\n"
+        "    [ \"$argument\" = '-fuse-ld=%s' ] && exit 0\n"
+        "done\n"
+        "exit 1\n", accept);
+    return n > 0 && n < (int)sizeof body && dsl_write(path, body) == 0;
+}
+
+static bool dsl_selector_start(const char *script, int *fd, pid_t *child)
+{
+    int fds[2];
+    if (pipe(fds) != 0) return false;
+    *child = fork();
+    if (*child == 0) {
+        (void)close(fds[0]);
+        if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(126);
+        (void)close(fds[1]);
+        execl(script, script, (char *)NULL);
+        _exit(127);
+    }
+    (void)close(fds[1]);
+    if (*child < 0) { (void)close(fds[0]); return false; }
+    *fd = fds[0];
+    return true;
+}
+
+static size_t dsl_selector_drain(int fd, char output[256])
+{
+    size_t used = 0;
+    for (;;) {
+        ssize_t n = read(fd, output + used, 255 - used);
+        if (n > 0) { used += (size_t)n; continue; }
+        if (n < 0 && errno == EINTR) continue;
+        break;
+    }
+    (void)close(fd);
+    output[used] = '\0';
+    return used;
+}
+
+static pid_t dsl_selector_wait(pid_t child, int *status)
+{
+    pid_t got;
+    do { got = waitpid(child, status, 0); } while (got < 0 && errno == EINTR);
+    return got;
+}
+
+static bool dsl_selector_result(const char *root, const char *cc, const char *wanted)
+{
+    char script[512], output[256];
+    if (snprintf(script, sizeof script, "%s/tools/dev/dev-linker-select.sh", root) >=
+        (int)sizeof script) return false;
+    if (cc ? setenv("CC", cc, 1) : unsetenv("CC")) return false;
+    int fd, status = 0;
+    pid_t child;
+    if (!dsl_selector_start(script, &fd, &child)) return false;
+    (void)dsl_selector_drain(fd, output);
+    pid_t got = dsl_selector_wait(child, &status);
+    if (got != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0 || strcmp(output, wanted)) {
+        fprintf(stderr, "selector CC=%s expected [%s] got [%s] status=%d wait=%d\n",
+                cc ? cc : "<unset>", wanted, output, status, (int)got);
+        return false;
+    }
+    return true;
+}
+
+static int test_depfile_scope_compilers(const char *root, const char *bins)
+{
+    int failures = 0;
+    struct fixture_env path = {0}, cc = {0};
+    TEST("depfile scope launch: selector uses the named compiler without a real compiler") {
+        ASSERT(fixture_env_save(&path, "PATH"));
+        ASSERT(fixture_env_save(&cc, "CC"));
+        ASSERT(dsl_selector_script(root));
+        ASSERT(dsl_fake_compiler(bins, "clang", "lld"));
+        ASSERT(dsl_fake_compiler(bins, "clang-fail", "none"));
+        ASSERT(dsl_fake_compiler(bins, "gcc-mold", "mold"));
+        ASSERT(dsl_fake_compiler(bins, "gcc-lld", "lld"));
+        ASSERT(dsl_fake_compiler(bins, "gcc-gold", "gold"));
+        ASSERT(dsl_fake_compiler(bins, "cc", "lld"));
+        ASSERT(fixture_path_prepend(bins));
+        char clang[512], wrapped[1024], cached[1024], options[1024], missing[512];
+        ASSERT(snprintf(clang, sizeof clang, "%s/clang", bins) < (int)sizeof clang);
+        ASSERT(snprintf(wrapped, sizeof wrapped, "zcc %s/clang", bins) < (int)sizeof wrapped);
+        ASSERT(snprintf(cached, sizeof cached, "sccache %s/clang", bins) < (int)sizeof cached);
+        ASSERT(snprintf(options, sizeof options, "%s -Qunused-arguments", clang) < (int)sizeof options);
+        ASSERT(snprintf(missing, sizeof missing, "%s/clang-fail", bins) < (int)sizeof missing);
+        ASSERT(dsl_selector_result(root, clang, "-fuse-ld=lld"));
+        ASSERT(dsl_selector_result(root, wrapped, "-fuse-ld=lld"));
+        ASSERT(dsl_selector_result(root, cached, "-fuse-ld=lld"));
+        ASSERT(dsl_selector_result(root, options, "-fuse-ld=lld"));
+        ASSERT(dsl_selector_result(root, missing, ""));
+        ASSERT(dsl_selector_result(root, "gcc-mold", "-fuse-ld=mold"));
+        ASSERT(dsl_selector_result(root, "gcc-lld", "-fuse-ld=lld"));
+        ASSERT(dsl_selector_result(root, "gcc-gold",
+            "-fuse-ld=gold -Wl,--threads -Wl,--thread-count=9"));
+        ASSERT(dsl_selector_result(root, NULL, "-fuse-ld=lld"));
+        PASS();
+    } _test_next:;
+    failures += !fixture_env_restore(&cc);
+    failures += !fixture_env_restore(&path);
+    return failures;
+}
+
 static int test_depfile_scope_success(const char *root, const char *bin_dir)
 {
     int failures = 0;
@@ -327,6 +458,7 @@ static int test_depfile_scope_selector_signal(const char *root, const char *bins
         ASSERT(snprintf(pidpath, sizeof pidpath, "%s/selector-pid", root) < (int)sizeof pidpath);
         ASSERT(snprintf(subpath, sizeof subpath, "%s/descendant-pid", root) < (int)sizeof subpath);
         ASSERT(snprintf(makelog, sizeof makelog, "%s/make.log", root) < (int)sizeof makelog);
+        ASSERT(dsl_fake_selector(root));
         (void)unlink(ready); (void)unlink(pidpath); (void)unlink(subpath); (void)unlink(makelog);
         child = fork();
         ASSERT(child >= 0);
@@ -427,6 +559,8 @@ int test_depfile_scope_launch(void)
         failures = 1;
     if (failures == 0)
         failures = test_depfile_scope_linker(root, bins);
+    if (failures == 0)
+        failures = test_depfile_scope_compilers(root, bins);
     if (failures == 0 && !dsl_work_gone(root))
         failures = 1;
     if (failures == 0)

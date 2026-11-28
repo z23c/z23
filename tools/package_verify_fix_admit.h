@@ -25,6 +25,49 @@ static bool pv_fix_admit_paths(char *source, char *build)
     return true;
 }
 
+static bool pv_fix_admit_llvm_name(const char *base)
+{
+    if (strncmp(base, "llvm-", 5) != 0 || !isdigit((unsigned char)base[5]))
+        return false;
+    for (const char *p = base + 5; *p; ++p)
+        if (!isdigit((unsigned char)*p) && *p != '.') return false;
+    return true;
+}
+
+static bool pv_fix_admit_toolchain_overlap(const char *toolchain,
+                                           const char *source, const char *build)
+{
+    return !strcmp(toolchain, source) || !strcmp(toolchain, build) ||
+           pv_fix_admit_beneath(toolchain, source) ||
+           pv_fix_admit_beneath(toolchain, build) ||
+           pv_fix_admit_beneath(source, toolchain) ||
+           pv_fix_admit_beneath(build, toolchain);
+}
+
+static bool pv_fix_admit_toolchain_grant(
+    const char *compiler, const char *source, const char *build,
+    char toolchain[4096], struct os_sandbox_path_rule *rules,
+    size_t *count, size_t cap)
+{
+    if (!realpath(compiler, toolchain)) return true;
+    char *bin = strrchr(toolchain, '/');
+    if (bin) *bin = '\0';
+    bin = bin ? strrchr(toolchain, '/') : NULL;
+    if (!bin || strcmp(bin, "/bin") != 0) return false;
+    *bin = '\0';
+    if (!strcmp(toolchain, "/usr") || !strcmp(toolchain, "/lib") ||
+        pv_fix_admit_beneath("/usr", toolchain) ||
+        pv_fix_admit_beneath("/lib", toolchain)) return true;
+    const char *base = strrchr(toolchain, '/');
+    base = base ? base + 1 : toolchain;
+    if (!pv_fix_admit_llvm_name(base) ||
+        pv_fix_admit_toolchain_overlap(toolchain, source, build) ||
+        *count >= cap) return false;
+    rules[(*count)++] = (struct os_sandbox_path_rule){
+        .path = toolchain, .allow_read = true, .allow_execute = true };
+    return true;
+}
+
 static int pv_fix_admit_outcome(const struct pv_run *run)
 {
     if (!run->launched || run->sandbox_fail || run->timed_out ||
@@ -61,13 +104,18 @@ static int pv_fix_admit_mode(int argc, char **argv)
         fprintf(stderr, "fix-admit: qualified confinement unavailable\n");
         return 5;
     }
-    struct os_sandbox_path_rule rules[PV_CHILD_GRANT_BASE_CAP];
+    bool compile = strcmp(argv[1], "--fix-admit-compile") == 0;
+    struct os_sandbox_path_rule rules[PV_CHILD_GRANT_BASE_CAP + 1u];
     size_t count = pv_child_grants(source, build, NULL, 0, rules,
                                    PV_CHILD_GRANT_BASE_CAP);
     if (!count) {
         fprintf(stderr, "fix-admit: grant construction failed\n");
         return 5;
     }
+    char toolchain[4096];
+    if (compile && !pv_fix_admit_toolchain_grant(
+            argv[4], source, build, toolchain, rules, &count,
+            sizeof(rules) / sizeof(rules[0]))) return 5;
     char tmpdir[4200];
     int n = snprintf(tmpdir, sizeof(tmpdir), "TMPDIR=%s", build);
     if (n < 0 || (size_t)n >= sizeof(tmpdir)) {
@@ -80,7 +128,6 @@ static int pv_fix_admit_mode(int argc, char **argv)
         .nproc = PV_COMPILE_NPROC, .fsize_bytes = PV_TEST_FSIZE_BYTES,
         .nofile = PV_TEST_NOFILE, .core_bytes = 0,
     };
-    bool compile = strcmp(argv[1], "--fix-admit-compile") == 0;
     g_pv_fix_admit = true;
     struct pv_run run = pv_run_child(compile ? PV_PROCESS_COMPILER : PV_PROCESS_TEST,
         (const char *const *)(argv + 4), build, &limits, true, rules, count, env, 60000);

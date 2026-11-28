@@ -696,7 +696,7 @@ int test_node_character_wire(void)
 
     /* ── (c) verify accepts exactly the self-consistent frames ──────────── */
     {
-        struct node_character_receipt r;
+        struct node_character_receipt r = {0};
         uint8_t frame[NODE_CHARACTER_WIRE_BYTES];
         uint8_t mutated[NODE_CHARACTER_WIRE_BYTES];
 
@@ -808,7 +808,7 @@ int test_node_character_wire(void)
 
     /* ── (d) the standing boundary ──────────────────────────────────────── */
     {
-        struct node_character_receipt r;
+        struct node_character_receipt r = {0};
         uint8_t frame[NODE_CHARACTER_WIRE_BYTES];
         struct ncw_stranger_result st = ncw_stranger_boundary(frame, &r);
         struct ncw_observed_result ob;

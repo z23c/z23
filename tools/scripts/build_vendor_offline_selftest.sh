@@ -285,41 +285,12 @@ if command -v c++ >/dev/null 2>&1; then
         fail 'a C driver without a C++ front end could not identify the lock helper compiler'
 fi
 
+"${HOST_CC:-cc}" -std=c23 -Wall -Wextra -Werror -pedantic \
+    "$ROOT/tools/dev/vendor_compiler_selftest.c" -o "$SANDBOX/vendor-compiler-selftest"
+"$SANDBOX/vendor-compiler-selftest" "$SANDBOX" "$fixture_machine"
+
 wait_lock_selftest || fail 'vendor lock selftest failed'
 
-# Bad bootstrap identities must refuse before touching an existing helper.
-cp -R "$SANDBOX/build/bin/vendor-lock" "$SANDBOX/helper-cache-before"
-cp "$SANDBOX/tools/dev/build-epoch-key.sh" "$SANDBOX/key-driver-before"
-printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$SANDBOX/tools/dev/build-epoch-key.sh"
-if output="$(ZCL_VENDOR_OFFLINE=1 "$SANDBOX/tools/scripts/build_vendor.sh" libz.a 2>&1)"; then
-    fail 'empty compiler identity admitted'
-fi
-[[ "$output" == *'vendor lock compiler identity invalid'* ]] || fail 'compiler identity refusal unnamed'
-cp "$SANDBOX/key-driver-before" "$SANDBOX/tools/dev/build-epoch-key.sh"
-cp "$SANDBOX/tools/scripts/vendor_provenance_lib.sh" "$SANDBOX/provenance-before"
-for hash_behavior in 'return 1' 'return 0'; do
-    cp "$SANDBOX/provenance-before" "$SANDBOX/tools/scripts/vendor_provenance_lib.sh"
-    printf '\nvp_sha256_file() { %s; }\n' "$hash_behavior" >> "$SANDBOX/tools/scripts/vendor_provenance_lib.sh"
-    if output="$(ZCL_VENDOR_OFFLINE=1 "$SANDBOX/tools/scripts/build_vendor.sh" libz.a 2>&1)"; then
-        fail 'failed or empty source hash admitted'
-    fi
-    [[ "$output" == *'vendor lock source hash'* ]] || fail 'source hash refusal unnamed'
-done
-cp "$SANDBOX/provenance-before" "$SANDBOX/tools/scripts/vendor_provenance_lib.sh"
-diff -r "$SANDBOX/helper-cache-before" "$SANDBOX/build/bin/vendor-lock" >/dev/null ||
-    fail 'identity refusal modified cached helper bytes'
-mkdir "$SANDBOX/unknown-legacy.lock"
-helper_path="$(find "$SANDBOX/build/bin/vendor-lock" -type f -name vendor-lock -print -quit)"
-[[ "$helper_path" =~ /[0-9a-f]{64}/vendor-lock$ ]] || fail 'qualified helper missing'
-helper_key="${helper_path%/vendor-lock}"
-helper_key="${helper_key##*/}"
-if output="$(VENDOR_LOCK_HELD=1 VENDOR_LOCK_HELPER_KEY="$helper_key" \
-    VENDOR_LOCK_DIR="$SANDBOX/unknown-legacy.lock" \
-    ZCL_VENDOR_OFFLINE=1 "$SANDBOX/tools/scripts/build_vendor.sh" libz.a 2>&1)"; then
-    fail 'helper key or forged environment bypassed unknown legacy lock'
-fi
-[[ "$output" == *vendor_lock_legacy_directory_refused* ]] || fail 'legacy refusal unnamed'
-[[ -d "$SANDBOX/unknown-legacy.lock" ]] || fail 'unknown legacy owner removed'
 
 if ZCL_VENDOR_OFFLINE=invalid "$ROOT/tools/scripts/build_vendor.sh" \
         --check-provenance >/dev/null 2>&1; then

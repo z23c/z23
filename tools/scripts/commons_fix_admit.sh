@@ -22,6 +22,15 @@ helper_inputs=(tools/jsonq.c tools/jsonq_standalone.c tools/multicall.h contexts
     contexts/commons/packages/zjsonp/src/zjsonp.c contexts/commons/packages/zutf8/include
     contexts/commons/packages/zutf8/src/zutf8.c)
 archive_helper() { git -C "$tool_root" archive HEAD "${helper_inputs[@]}" > "$1" 2>/dev/null; }
+read -r -a compiler_argv <<< "${CC:-gcc-14}"
+((${#compiler_argv[@]} > 0)) || refuse compiler-unavailable
+case "${compiler_argv[0]##*/}" in env|zcc|ccache|sccache)
+    ((${#compiler_argv[@]} > 1)) || refuse compiler-unavailable
+    compiler_argv=("${compiler_argv[@]:1}")
+;; esac
+if [[ ${compiler_argv[0]} == */* && ${compiler_argv[0]} != /* ]]; then
+    compiler_argv[0]=$tool_root/${compiler_argv[0]}
+fi
 
 selftest_helper() {
     local fixture=$1 subject=$2 toolkit=$1/toolkit
@@ -146,7 +155,7 @@ selftest_native() {
     done
     # A regular-file RLIMIT_FSIZE death must not become an ordinary red exit.
     printf '#include <stdio.h>\nint main(void) { FILE *f=fopen("limit-file", "wb"); if(!f) return 0; char block[65536]={0}; for(int i=0;i<1025;i++) if(fwrite(block, 1, sizeof(block), f) != sizeof(block)) { fclose(f); return 0; } fclose(f); return 0; }\n' > "$fixture/native-source/file-limit.c" || return 1
-    "$verifier" --fix-admit-compile "$fixture/native-source" "$fixture/native-build" "${CC:-gcc-14}" \
+    "$verifier" --fix-admit-compile "$fixture/native-source" "$fixture/native-build" "${compiler_argv[@]}" \
         -std=c23 -O1 -Wall -Wextra -Werror -pedantic "$fixture/native-source/file-limit.c" \
         -o "$fixture/native-build/file-limit" || return 1
     rc=0
@@ -291,16 +300,15 @@ root=$(git rev-parse --show-toplevel 2>/dev/null) || refuse no-repository
 scratch=$(mktemp -d) || refuse temporary-copy-failed
 trap 'rm -rf "$scratch"' EXIT
 cp "$patch" "$scratch/patch" || refuse temporary-copy-failed
-compiler=${CC:-gcc-14}
 verifier=$tool_root/build/bin/z23-package-verify-dev
 [[ -x "$verifier" ]] || refuse confinement-unavailable
-if ! command -v "$compiler" >/dev/null 2>&1; then refuse compiler-unavailable; fi
+if ! command -v "${compiler_argv[0]}" >/dev/null 2>&1; then refuse compiler-unavailable; fi
 # Pin the toolkit's accepted helper inputs; caller proposals remain inert even
 # when the caller is the toolkit checkout and has dirty parser-library files.
 mkdir "$scratch/helper" || refuse temporary-copy-failed
 archive_helper "$scratch/helper.tar" || refuse helper-source-unavailable
 tar -xf "$scratch/helper.tar" -C "$scratch/helper" || refuse helper-source-unavailable
-"$compiler" -std=c23 -O1 -I"$scratch/helper/contexts/commons/packages/zjsonp/include" \
+"${compiler_argv[@]}" -std=c23 -O1 -I"$scratch/helper/contexts/commons/packages/zjsonp/include" \
     -I"$scratch/helper/contexts/commons/packages/zutf8/include" \
     "$scratch/helper/tools/jsonq.c" "$scratch/helper/tools/jsonq_standalone.c" "$scratch/helper/contexts/commons/packages/zjsonp/src/zjsonp.c" \
     "$scratch/helper/contexts/commons/packages/zutf8/src/zutf8.c" \
@@ -354,7 +362,7 @@ build_test() {
     local -a absolute_includes=() absolute_sources=()
     for token in "${includes[@]}"; do absolute_includes+=("-I$scratch/tree/${token#-I}"); done
     for token in "${sources[@]}"; do absolute_sources+=("$scratch/tree/$token"); done
-    "$verifier" --fix-admit-compile "$scratch/tree" "$scratch/$name" "$compiler" \
+    "$verifier" --fix-admit-compile "$scratch/tree" "$scratch/$name" "${compiler_argv[@]}" \
         -std=c23 -O1 -Wall -Wextra -Werror -pedantic "${absolute_includes[@]}" "${absolute_sources[@]}" \
         "$scratch/tree/$prefix/tests/test_$package.c" -lm -o "$scratch/$name/test" > "$scratch/$name.build" 2>&1
 }
