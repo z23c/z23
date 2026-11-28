@@ -1256,12 +1256,6 @@ static bool main_research_prepare(int argc, char ***args,
         fprintf(stderr, "Research profile directory requires its selector.\n");
         return false;
     }
-#if !defined(_WIN32)
-    if (!main_research_identity(path + 9)) {
-        fprintf(stderr, "Research profile directory identity is missing or invalid.\n");
-        return false;
-    }
-#endif
     char **copy = zcl_calloc((size_t)argc + 1, sizeof(*copy), "research_argv");
     if (!copy) return false;
     memcpy(copy, argv, ((size_t)argc + 1) * sizeof(*copy));
@@ -1271,12 +1265,29 @@ static bool main_research_prepare(int argc, char ***args,
     return true;
 }
 
-static bool main_research_config_ok(bool active, int argc, char **argv)
+#include "config/boot_ballot_catalog.h"
+static bool main_research_bind(const struct main_research_selection *research,
+                               const char *path, int argc, char **argv)
 {
+    (void)path;
     if (is_cli_mode(argc, argv)) return true;
-    if (GetArg("-testnet-profile", NULL)) return false;
-    return !active || (!GetArg("-testnet", NULL) &&
-        !GetArg("-regtest", NULL) && !GetArg("-regtestshielded", NULL));
+    if (GetArg("-testnet-profile", NULL) || (research->profile &&
+        (GetArg("-testnet", NULL) || GetArg("-regtest", NULL) ||
+         GetArg("-regtestshielded", NULL)))) {
+        fprintf(stderr, "Research profile config contains a conflicting network selector.\n");
+        return false;
+    }
+    if (research->profile && !boot_ballot_catalog_consent_present()) {
+        fprintf(stderr, "%s\n", boot_ballot_catalog_consent_refusal);
+        return false;
+    }
+#if !defined(_WIN32)
+    if (research->profile && !main_research_identity(path + 9)) {
+        fprintf(stderr, "Research profile directory identity is missing or invalid.\n");
+        return false;
+    }
+#endif
+    return true;
 }
 
 static bool main_dispatch_reserved(int argc, char **argv, int *rc)
@@ -1330,8 +1341,7 @@ int main(int argc, char **argv)
                           sizeof(conf_datadir));
         GetConfigFilePath(conf_datadir, conf_path, sizeof(conf_path));
         (void)ReadConfigFile(conf_path);
-        if (!main_research_config_ok(research.profile != NULL, argc, argv)) {
-            fprintf(stderr, "Research profile config contains a conflicting network selector.\n");
+        if (!main_research_bind(&research, research_arg, argc, argv)) {
             return 1;
         }
     }

@@ -13,6 +13,9 @@
 #include <stdio.h>
 #include <string.h>
 #if !defined(_WIN32)
+#include <errno.h>
+#include <fcntl.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <dirent.h>
@@ -131,8 +134,88 @@ static bool prologue_refusal(const char *dir)
         WEXITSTATUS(status) == 0 && snapshot_tree(dir, "", &after) && after.count == 0;
 }
 
+static bool binary_fresh(void)
+{
+    struct stat binary, source;
+    const char *files[] = {"engine/entry/main.c", "engine/composition/src/boot.c",
+        "engine/composition/src/boot_ballot_catalog.c"};
+    if (stat("build/bin/z23", &binary)) return false;
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i)
+        if (stat(files[i], &source) || source.st_mtime > binary.st_mtime) return false;
+    return true;
+}
+
+static bool binary_refuse(const char *home, const char *parent, int *rc, char *out, size_t cap)
+{
+    char arg[1024];
+    if (snprintf(arg, sizeof(arg), "-datadir=%s", parent) >= (int)sizeof(arg)) return false;
+    FILE *capture = tmpfile();
+    if (!capture) return false;
+    pid_t child = fork();
+    if (child == 0) {
+        alarm(10);
+        int nullfd = open("/dev/null", O_WRONLY);
+        if (nullfd < 0 || dup2(nullfd, STDOUT_FILENO) < 0 ||
+            dup2(fileno(capture), STDERR_FILENO) < 0 || setenv("HOME", home, 1))
+            _exit(127);
+        close(nullfd);
+        execl("build/bin/z23", "z23", arg, "-testnet-profile=ironwood", (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    bool ok = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status);
+    *rc = ok ? WEXITSTATUS(status) : -1;
+    rewind(capture);
+    size_t n = fread(out, 1, cap - 1, capture);
+    out[n] = '\0';
+    if (ferror(capture)) ok = false;
+    if (fclose(capture)) ok = false;
+    return ok && *rc != 0 && *rc != 127 &&
+        strstr(out, "the research profile requires an explicitly pinned catalog");
+}
+
+static bool write_fixture_file(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    size_t len = strlen(text);
+    bool ok = fwrite(text, 1, len, f) == len;
+    return fclose(f) == 0 && ok;
+}
+
+static int binary_consent_case(bool existing)
+{
+    char home[512], parent[600], dir[700], marker[800], sentinel[800], output[4096] = {0};
+    struct snapshot before = {0}, after = {0};
+    int rc = -1;
+    if (!test_mkdtemp(home, sizeof(home), "ballot_binary")) return 1;
+    snprintf(parent, sizeof(parent), "%s/parent", home);
+    snprintf(dir, sizeof(dir), "%s/ironwood-research", parent);
+    snprintf(marker, sizeof(marker), "%s/.z23-research-profile", dir);
+    snprintf(sentinel, sizeof(sentinel), "%s/sentinel", dir);
+    bool ready = mkdir(parent, 0700) == 0;
+    if (ready && existing)
+        ready = mkdir(dir, 0700) == 0 &&
+            write_fixture_file(marker, "z23-research-profile:ironwood:v1\n") &&
+            write_fixture_file(sentinel, "untouched\n") && chmod(dir, 0755) == 0 &&
+            snapshot_tree(dir, "", &before);
+    bool refused = ready && binary_refuse(home, parent, &rc, output, sizeof(output));
+    struct stat st;
+    bool unchanged = existing ? stat(dir, &st) == 0 && (st.st_mode & 0777) == 0755 &&
+        snapshot_tree(dir, "", &after) && snapshot_equal(&before, &after) :
+        lstat(dir, &st) != 0 && errno == ENOENT;
+    if (!refused || !unchanged)
+        fprintf(stderr, "binary consent %s: refused=%d rc=%d unchanged=%d output=%s\n",
+                existing ? "marked" : "absent", refused, rc, unchanged, ready ? output : "(setup failed)");
+    (void)test_rm_rf_recursive(home);
+    return refused && unchanged ? 0 : 1;
+}
+
 int test_boot_ballot_catalog(void)
 {
+    CHECK(binary_fresh());
+    int binary_failures = binary_consent_case(false) + binary_consent_case(true);
+    CHECK(binary_failures == 0);
     const char *empty[] = {"z23"};
     ParseParameters(1, empty);
     chain_params_select(CHAIN_MAIN);

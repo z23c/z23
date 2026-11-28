@@ -29,17 +29,23 @@ static bool boot_ballot_network_allowed(const struct app_context *ctx, bool rese
              (GetBoolArg("-testnet", false) && GetBoolArg("-regtest", false)));
 }
 
-/* No earlier filesync check is needed: args_apply_research_defaults in
- * boot_node_utilities.c:411-427 refuses research foreign-state options. */
+const char boot_ballot_catalog_consent_refusal[] =
+    "FATAL: the research profile requires an explicitly pinned catalog "
+    "(-testballotcatalog <digest>)";
+
+bool boot_ballot_catalog_consent_present(void)
+{
+    return GetArg("-testballotcatalog", NULL) != NULL;
+}
+
 bool boot_ballot_catalog_consent(const struct app_context *ctx)
 {
     if (!ctx) {
         fprintf(stderr, "FATAL: cannot configure ballot catalog without boot context\n");
         return false;
     }
-    if (ctx->testnet_profile && !GetArg("-testballotcatalog", NULL)) {
-        fprintf(stderr, "FATAL: the research profile requires an explicitly pinned catalog "
-                        "(-testballotcatalog <digest>)\n");
+    if (ctx->testnet_profile && !boot_ballot_catalog_consent_present()) {
+        fprintf(stderr, "%s\n", boot_ballot_catalog_consent_refusal);
         return false;
     }
     return true;
@@ -57,8 +63,7 @@ bool boot_ballot_catalog_load(struct app_context *ctx)
     ctx->ballot_catalog_pin_present = false;
     if (!digest) {
         if (!research) return true;
-        fprintf(stderr, "FATAL: the research profile requires an explicitly pinned catalog "
-                        "(-testballotcatalog <digest>)\n");
+        fprintf(stderr, "%s\n", boot_ballot_catalog_consent_refusal);
         return false;
     }
     if (!boot_ballot_network_allowed(ctx, research)) {
