@@ -2119,9 +2119,7 @@ sweep_scratch
 sweep_ramscratch
 sweep_wtbuild
 sweep_landtmp
-if [ "$ONLY" = landed ] || [ "$REAP_LANDED" = 1 ] || [ "${ZCL_HOST_GC_LANDED_REPORT:-1}" != 0 ]; then
-    sweep_landed
-fi
+if [ "$ONLY" = landed ] || [ "$REAP_LANDED" = 1 ] || [ "${ZCL_HOST_GC_LANDED_REPORT:-1}" != 0 ]; then sweep_landed; fi
 sweep_quarantine_expiry
 sweep_zcc
 

@@ -155,22 +155,17 @@ git -C "$REPO_FX" commit -q -m base
 # given MODE (dry-run|apply) against the fixture tree, capturing output.
 run_hostgc() {
     local cat="$1" mode="$2"; shift 2
-    local -a selection=()
-    if [ -n "$cat" ]; then selection=(--only "$cat"); fi
+    local -a selection=(); [ -z "$cat" ] || selection=(--only "$cat")
     env \
-        ZCL_HOST_GC_HOME="$HOME_FX" \
-        ZCL_HOST_GC_TMP="$TMP_FX" \
-        ZCL_HOST_GC_PROC="$PROC_FX" \
-        ZCL_HOST_GC_STATE="$STATE_FX" \
+        ZCL_HOST_GC_HOME="$HOME_FX" ZCL_HOST_GC_TMP="$TMP_FX" \
+        ZCL_HOST_GC_PROC="$PROC_FX" ZCL_HOST_GC_STATE="$STATE_FX" \
         ZCL_HOST_GC_REPO="$REPO_FX" \
-        ZCL_HOST_GC_UNITS_DIR="$UNITS_FX" \
-        ZCL_HOST_GC_LANES_DIR="$LANES_FX" \
+        ZCL_HOST_GC_UNITS_DIR="$UNITS_FX" ZCL_HOST_GC_LANES_DIR="$LANES_FX" \
         ZCL_HOST_GC_TRAINS_DIR="$TRAINS_FX" \
         ZCL_HOST_GC_SCRATCH_DIR="$SCRATCH_FX" \
         ZCL_HOST_GC_DEVSCRATCH_DIR="$DEVSCRATCH_FX" \
         ZCL_HOST_GC_ZCC_DIR="$ZCCDIR_FX" \
-        ZCL_HOST_GC_Z23P="$Z23P_FX" \
-        ZCL_HOST_GC_RAM_ROOT="$RAM_FX" \
+        ZCL_HOST_GC_Z23P="$Z23P_FX" ZCL_HOST_GC_RAM_ROOT="$RAM_FX" \
         ZCL_HOST_GC_RAM_SCRATCH_DIR="$RAMSCR_FX" \
         ZCL_HOST_GC_Z23_BIN="${ZCL_HOST_GC_Z23_BIN:-$Z23_STUB}" \
         ZCL_HOST_GC_WORKTREE_GC="$WORKTREE_STUB" \
@@ -210,28 +205,25 @@ assert_gone() { if [ -e "$1" ]; then fail "$2"; else pass "$3"; fi; }
 # A fixed 2000-01-01 stamp, not `touch -d '3 days ago'`: GNU touch's -d does
 # not exist on macOS, and every age floor this selftest exercises is set to 0
 # by run_hostgc, so any old timestamp satisfies each check portably.
-touch_old() { touch -t 200001010000 -- "$1"; }
-mkdir -p -- "$TMP_FX/orphan-fixture"
-touch_old "$TMP_FX/orphan-fixture"
-mkdir -p -- "$TMP_FX/claude-keepme"   # matches the standing exemption prefix
-touch_old "$TMP_FX/claude-keepme"
-mkdir -p -- "$TMP_FX/codex-daemon-keepme" "$TMP_FX/cc-daemon-keepme"
-touch_old "$TMP_FX/codex-daemon-keepme"
-touch_old "$TMP_FX/cc-daemon-keepme"
+touch_old() { touch -t 200001010000 -- "$@"; }
+mkdir -p -- "$TMP_FX/orphan-fixture"; touch_old "$TMP_FX/orphan-fixture"
+for name in claude-keepme codex-daemon-keepme cc-daemon-keepme; do
+    mkdir -p -- "$TMP_FX/$name"; touch_old "$TMP_FX/$name"
+done
 
 out="$(run_hostgc tmplitter dry-run)"
 log="$(cat -- "$STATE_FX/host_gc.log" 2>/dev/null || true)"
 assert_contains "$log" "orphan-fixture" "tmplitter dry-run logs the unregistered entry as reapable"
-assert_not_contains "$log" "claude-keepme" "tmplitter dry-run never logs an exempt entry"
-assert_not_contains "$log" "codex-daemon-keepme" "tmplitter dry-run preserves codex daemon files"
-assert_not_contains "$log" "cc-daemon-keepme" "tmplitter dry-run preserves cc daemon files"
+for name in claude-keepme codex-daemon-keepme cc-daemon-keepme; do
+    assert_not_contains "$log" "$name" "tmplitter dry-run preserves $name"
+done
 assert_contains "$out" "1 reapable" "tmplitter dry-run summary counts the reapable entry"
 
 out="$(run_hostgc tmplitter apply)"
 assert_gone "$TMP_FX/orphan-fixture" "tmplitter apply left the unregistered entry behind" "tmplitter apply removed the unregistered entry"
-[ -e "$TMP_FX/claude-keepme" ] || fail "tmplitter apply removed an exempt entry"
-[ -e "$TMP_FX/codex-daemon-keepme" ] || fail "tmplitter apply removed codex daemon files"
-[ -e "$TMP_FX/cc-daemon-keepme" ] || fail "tmplitter apply removed cc daemon files"
+for name in claude-keepme codex-daemon-keepme cc-daemon-keepme; do
+    [ -e "$TMP_FX/$name" ] || fail "tmplitter apply removed $name"
+done
 
 # -------------------------------------------------------------------- z23p
 # z23p only ever looks at entries `git worktree list` reports for GC_REPO,
@@ -512,13 +504,10 @@ else
 fi
 
 # ------------------------------------------------------------------ scratch
-mkdir -p -- "$SCRATCH_FX/orphaned-lane"
-touch_old "$SCRATCH_FX/orphaned-lane"
-mkdir -p -- "$SCRATCH_FX/pinned-lane"
-touch_old "$SCRATCH_FX/pinned-lane"
+mkdir -p -- "$SCRATCH_FX/orphaned-lane" "$SCRATCH_FX/pinned-lane"
+touch_old "$SCRATCH_FX/orphaned-lane" "$SCRATCH_FX/pinned-lane"
 printf 'pinned-lane\n' > "$SCRATCH_FX/.gc_keep"
-mkdir -p -- "$LANES_FX/still-here"
-mkdir -p -- "$SCRATCH_FX/still-here"
+mkdir -p -- "$LANES_FX/still-here" "$SCRATCH_FX/still-here"
 touch_old "$SCRATCH_FX/still-here"
 
 out="$(run_hostgc scratch dry-run)"
@@ -728,8 +717,7 @@ assert_gone "$WT_FX/wt-mid/build/obj" "wtbuild under low disk kept output idle f
 mkdir -p -- "$REPO_FX/test-tmp/stale-rig" "$REPO_FX/test-tmp/fresh-rig"
 printf 'stale\n' > "$REPO_FX/test-tmp/stale-rig/f"
 printf 'fresh\n' > "$REPO_FX/test-tmp/fresh-rig/f"
-touch_old "$REPO_FX/test-tmp/stale-rig/f"
-touch_old "$REPO_FX/test-tmp/stale-rig"
+touch_old "$REPO_FX/test-tmp/stale-rig/f" "$REPO_FX/test-tmp/stale-rig"
 
 out="$(run_hostgc repotmp dry-run)"
 assert_contains "$out" "stale-rig" "repotmp dry-run names a stale main-checkout scratch entry"
@@ -749,8 +737,7 @@ assert_gone "$REPO_FX/test-tmp/stale-rig" "repotmp apply left stale main-checkou
 
 # The batch cap bounds one run's work and reports the backlog it left.
 mkdir -p -- "$REPO_FX/test-tmp/cap-a" "$REPO_FX/test-tmp/cap-b"
-touch_old "$REPO_FX/test-tmp/cap-a"
-touch_old "$REPO_FX/test-tmp/cap-b"
+touch_old "$REPO_FX/test-tmp/cap-a" "$REPO_FX/test-tmp/cap-b"
 out="$(ZCL_HOST_GC_REPOTMP_BATCH_MAX=1 run_hostgc repotmp apply)"
 assert_contains "$out" "of 2 stale entries" "repotmp batch run reports the remaining backlog"
 left="$(find "$REPO_FX/test-tmp" -mindepth 1 -maxdepth 1 -name 'cap-*' | wc -l)"
@@ -825,12 +812,9 @@ landed_sha="$(git -C "$WT_FX/lane-landed" rev-parse HEAD)"
 
 out="$(run_hostgc "" dry-run ZCL_HOST_GC_LANDED_REPORT=0)"
 assert_not_contains "$out" "fully landed idle worktrees" "full sweep honors landed report opt-out"
-out="$(run_hostgc landed dry-run ZCL_HOST_GC_LANDED_REPORT=0)"
-assert_contains "$out" "fully landed idle worktrees" "explicit landed still runs with report disabled"
-out="$(HGT_EXTRA_ARGS=--reap-landed-worktrees run_hostgc "" dry-run ZCL_HOST_GC_LANDED_REPORT=0)"
-assert_contains "$out" "fully landed idle worktrees" "explicit reap still runs with report disabled"
+assert_contains "$(HGT_EXTRA_ARGS=--reap-landed-worktrees run_hostgc "" dry-run ZCL_HOST_GC_LANDED_REPORT=0)" "fully landed idle worktrees" "explicit reap overrides report opt-out"
 
-out="$(run_hostgc landed apply)"
+out="$(run_hostgc landed apply ZCL_HOST_GC_LANDED_REPORT=0)"
 assert_contains "$out" "opt-in" "landed without --reap-landed-worktrees says it is opt-in"
 [ -d "$WT_FX/lane-landed" ] || fail "landed removed a worktree without the opt-in flag"
 
