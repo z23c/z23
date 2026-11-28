@@ -12966,8 +12966,8 @@ $(NODE_C23_OBJ_DIR)/core/modules/net/src/msgprocessor.o: NODE_C23_OBJECT_CFLAGS 
 $(NODE_C23_OBJ_DIR)/core/modules/validation/src/process_block_flush_policy.o: NODE_C23_OBJECT_CFLAGS += -Wno-unused-but-set-global
 $(OBJ_DIR)/core/modules/net/src/msgprocessor.o: BUILD_ONLY_OBJECT_CFLAGS += -Wno-unused-but-set-global
 $(OBJ_DIR)/core/modules/validation/src/process_block_flush_policy.o: BUILD_ONLY_OBJECT_CFLAGS += -Wno-unused-but-set-global
-$(DEV_OBJ_DIR)/core/modules/net/src/msgprocessor.o: DEV_COMPILE_CFLAGS += -Wno-unused-but-set-global
-$(DEV_OBJ_DIR)/core/modules/validation/src/process_block_flush_policy.o: DEV_COMPILE_CFLAGS += -Wno-unused-but-set-global
+$(foreach stem,core/modules/net/src/msgprocessor core/modules/validation/src/process_block_flush_policy,\
+	$(DEV_OBJ_DIR)/$(stem).o $(CLANG_FACTS_OUT_DIR)/$(stem).zsm $(CLANG_FACTS_OUT_DIR)/$(stem).argv): private DEV_COMPILE_CFLAGS += -Wno-unused-but-set-global
 $(TEST_FAST_OBJ_DIR)/core/modules/net/src/msgprocessor.o: TEST_FAST_OBJECT_CFLAGS += -Wno-unused-but-set-global
 $(TEST_FAST_OBJ_DIR)/core/modules/validation/src/process_block_flush_policy.o: TEST_FAST_OBJECT_CFLAGS += -Wno-unused-but-set-global
 $(TEST_REL_OBJ_DIR)/core/modules/net/src/msgprocessor.o: TEST_REL_OBJECT_CFLAGS += -Wno-unused-but-set-global
