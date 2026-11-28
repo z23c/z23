@@ -31,7 +31,7 @@ static bool append_shapes(const uint8_t *params, const uint8_t leaves[4][32])
     }
     return ironwood_note_frontier_extend(&batch, leaves, 4, params,
                 IRONWOOD_MERKLE_PARAMETERS_SIZE, batched).ok &&
-           memcmp(&tree, &batch, sizeof tree) == 0 && memcmp(root, batched, 32) == 0;
+           tree.count == batch.count && memcmp(tree.slots, batch.slots, sizeof tree.slots) == 0 && memcmp(root, batched, 32) == 0;
 }
 
 static bool rollback(const uint8_t *params, const uint8_t leaves[4][32])
