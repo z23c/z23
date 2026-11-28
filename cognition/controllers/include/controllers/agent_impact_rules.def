@@ -3092,6 +3092,7 @@ AGENT_IMPACT_RULE("platform/modules/platform/include/platform/read_mapping.h", "
  * no-op check that msg_blocks.c still calls; nothing sets its pending flag,
  * so no registered group reaches it. Removing it is a later core unit. */
 AGENT_IMPACT_RULE("core/modules/net/src/https_deferred.c", "make_lint_gates")
+AGENT_IMPACT_RULE("engine/services/src/research_coin.c|engine/services/include/services/research_coin.h|tests/harness/src/test_research_coin.c", "research_coin")
 AGENT_IMPACT_RULE("engine/services/src/https_deferred_start.c|engine/services/include/services/https_deferred_start.h", "https_deferred_start make_lint_gates")
 
 /* Five fail-closed Windows boundary units the merge split out of their
