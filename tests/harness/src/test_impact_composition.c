@@ -13512,7 +13512,13 @@ static int test_ic_local_selection_build_needs(void)
         /* The operator contract exercises the real native claim CLI. */
         ASSERT(zcl_test_selection_build_needs("test_make_lint_gates_realroot",
                                               true, NULL, needs, 19, &n));
+#if defined(_WIN32)
         ASSERT(n == 1);
+#else
+        ASSERT(n == 3);
+        ASSERT(ic_needs_have(needs, n, "gate-receipt-bin", "build/bin/gate_receipt"));
+        ASSERT(ic_needs_have(needs, n, "agent-sha3", "build/bin/agent_sha3"));
+#endif
         ASSERT(ic_needs_have(needs, n, "dev-bin", "build/bin/z23-dev"));
         n = 99;
 

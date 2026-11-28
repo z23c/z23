@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Signal contract of tools/agent/gate_receipt.c, the C23 receipt wrapper
- * behind build/bin/gate_receipt. Each case builds the wrapper into a
+ * behind build/bin/gate_receipt. Each case copies the built wrapper into a
  * private fixture, starts it on a command that announces readiness through an
  * inherited pipe (never a pidfile), signals the wrapper, and checks that the
  * wrapper died of that signal, stopped and reaped its child, published no
@@ -46,33 +46,21 @@ static int rcptsig_run(char *const argv[])
 
 static int rcptsig_build(const char *root, const char *fix)
 {
-    const char *cc = getenv("CC");
-    char out[PATH_MAX], inc_a[PATH_MAX], inc_b[PATH_MAX], inc_c[PATH_MAX], inc_d[PATH_MAX];
-    char s0[PATH_MAX], s1[PATH_MAX], s2[PATH_MAX], s3[PATH_MAX], s4[PATH_MAX], s5[PATH_MAX], dirs[PATH_MAX];
+    char src[PATH_MAX], out[PATH_MAX], dirs[PATH_MAX];
 
     snprintf(dirs, sizeof dirs, "%s/build/bin", fix);
-    snprintf(out, sizeof out, "%s/gate_receipt", dirs);
-    snprintf(inc_a, sizeof inc_a, "-I%s/platform/modules/sha3/include", root);
-    snprintf(inc_b, sizeof inc_b, "-I%s/core/modules/crypto/include", root);
-    snprintf(inc_c, sizeof inc_c, "-I%s/platform/modules/base/include", root);
-    snprintf(inc_d, sizeof inc_d, "-I%s/platform/modules/support/include", root);
-    snprintf(s0, sizeof s0, "%s/tools/agent/gate_receipt.c", root);
-    snprintf(s1, sizeof s1, "%s/tools/agent/gate_receipt_proc.c", root);
-    snprintf(s2, sizeof s2, "%s/tools/agent/gate_receipt_text.c", root);
-    snprintf(s3, sizeof s3, "%s/platform/modules/sha3/src/sha3.c", root);
-    snprintf(s4, sizeof s4, "%s/platform/modules/base/src/safe_alloc.c", root);
     char *const mk[] = {"mkdir", "-p", dirs, nullptr};
-    char *const build[] = {(char *)(cc && *cc ? cc : "cc"), "-std=c23", "-O2", "-Wall", "-Wextra", "-Werror",
-                           inc_a, inc_b, inc_c, inc_d, "-o", out, s0, s1, s2, s3, s4, nullptr};
-
-    if (rcptsig_run(mk) != 0 || rcptsig_run(build) != 0)
+    if (rcptsig_run(mk) != 0)
         return -1;
-    snprintf(out, sizeof out, "%s/agent_sha3", dirs);
-    snprintf(s0, sizeof s0, "%s/tools/agent/agent_sha3.c", root);
-    snprintf(s5, sizeof s5, "%s/platform/modules/sha3/src/sha3.c", root);
-    char *const helper[] = {build[0], "-std=c23", "-O2", inc_a, inc_b, inc_c, inc_d, "-o", out, s0, s5, nullptr};
-
-    return rcptsig_run(helper);
+    const char *const names[] = {"gate_receipt", "agent_sha3"};
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        int a = snprintf(src, sizeof src, "%s/build/bin/%s", root, names[i]);
+        int b = snprintf(out, sizeof out, "%s/%s", dirs, names[i]);
+        if (a < 0 || (size_t)a >= sizeof src || b < 0 || (size_t)b >= sizeof out ||
+            access(src, X_OK) != 0 || copy_file(src, out) != 0 || chmod(out, 0700) != 0)
+            return -1;
+    }
+    return 0;
 }
 
 static int rcptsig_git_init(const char *fix)
