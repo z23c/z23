@@ -2284,6 +2284,7 @@ AGENT_IMPACT_RULE("tools/ship.sh|tools/ship_selftest.sh|tools/scripts/ship_progr
  * shown to require. */
 AGENT_IMPACT_RULE("platform/modules/base/include/base/compiler.h", "make_lint_gates")
 AGENT_IMPACT_RULE("core/modules/crypto/src/blake2b_avx2.c", "crypto crypto_perf_selftest make_lint_gates")
+AGENT_IMPACT_RULE("engine/services/src/research_quorum.c|engine/services/include/services/research_quorum.h|tests/harness/src/test_research_quorum.c", "research_quorum")
 AGENT_IMPACT_RULE("platform/modules/platform/include/platform/allocator_compat.h", "make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/platform/include/platform/barrier.h", "make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/platform/include/platform/device_compat.h", "hw_profile make_lint_gates")
