@@ -248,6 +248,7 @@ void zw_model_watchdog(struct zw_model *m, uint16_t port);
 bool zw_model_apply(struct zw_model *m, struct zw_result *r);
 void zw_model_publish(const struct zw_model *m, struct gui_ui *ui, int64_t now_s);
 uint32_t zw_backoff_s(int fail_count);
+bool zw_test_coin_units(const struct zw_model *m);
 uint32_t zw_structure_key(const struct zw_model *m, size_t screen);
 void zw_diagnostics(const struct zw_model *m, char *buf, size_t cap);
 enum zw_sync zw_sync_classify(const struct zw_model *m, int64_t now_s);

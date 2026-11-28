@@ -136,6 +136,7 @@ enum zw_send_dlg { ZW_DLG_NONE, ZW_DLG_ERROR, ZW_DLG_INFO, ZW_DLG_SYNC_GATE, ZW_
 /* Everything the page shows, derived from the fields and the model by
  * zw_send_sync. It is plain data: its bytes are the page's structure key. */
 struct zw_send_view {
+    char unit[4];
     char badge[160], from_label[160], avail[128], totals[160], fee[24];
     uint8_t badge_style, nrcpt, max_on, from_open, can_add, card, connected;
     uint8_t addr_state[ZW_SEND_RCPT_MAX], amt_state[ZW_SEND_RCPT_MAX], memo_on[ZW_SEND_RCPT_MAX];

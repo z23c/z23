@@ -615,6 +615,20 @@ static void sv_page_flow(void)
 {
     struct page p;
     if (!page_up(&p, "send_success", true, 1.0f)) { CHECK("page up", false); page_down(&p); return; }
+    struct zw_chain original = p.n.m.chain;
+    snprintf(p.n.m.chain.chain, sizeof(p.n.m.chain.chain), "test");
+    page_frame(&p, NULL);
+    CHECK("reported testnet updates recipient, fee and available funds on an ordinary endpoint",
+          !p.n.m.testnet && !strcmp(node_label(&p, "s_r1_unit"), "ZCT") &&
+          !strcmp(node_label(&p, "s_fee_unit"), "ZCT") && strstr(p.s->view.avail, "12.5 ZCT"));
+    p.n.m.testnet = true;
+    snprintf(p.n.m.chain.chain, sizeof(p.n.m.chain.chain), "regtest");
+    page_frame(&p, NULL);
+    CHECK("reported regtest uses ZCL for recipient, fee and available funds on a test endpoint",
+          !strcmp(node_label(&p, "s_r1_unit"), "ZCL") && !strcmp(node_label(&p, "s_fee_unit"), "ZCL") &&
+          strstr(p.s->view.avail, "12.5 ZCL"));
+    p.n.m.testnet = false;
+    p.n.m.chain = original;
     page_review(&p);
     page_confirm(&p);
     page_send(&p);

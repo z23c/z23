@@ -176,6 +176,17 @@ bool zw_model_synced(const struct zw_model *m, int64_t now_s)
     return s == ZW_SYNC_SYNCED || s == ZW_SYNC_LOCAL;
 }
 
+bool zw_test_coin_units(const struct zw_model *m)
+{
+    /* Legacy getinfo.testnet is false for main and regtest, true for test. */
+    if (m->have_chain) {
+        const char *chain = m->chain.chain;
+        if (!strcmp(chain, "test") || !strcmp(chain, "ironwood")) return true;
+        if (!strcmp(chain, "main") || !strcmp(chain, "regtest")) return false;
+    }
+    return m->testnet;
+}
+
 const char *zw_node_kind(const struct zw_model *m)
 {
     enum zw_profile p = m->profile != ZW_PROFILE_AUTO ? m->profile : m->requested;
@@ -228,7 +239,7 @@ uint32_t zw_structure_key(const struct zw_model *m, size_t screen)
     k |= bit(m->narrow, 19) | bit(m->about_open, 20) | bit(m->msg[0] != 0, 21);
     k |= bit(peers_of(m) == 0, 22) | bit(m->have_info && m->info.has_solps, 23);
     k |= (uint32_t)(zw_sync_classify(m, m->now_s) & 7u) << 24;
-    return k;
+    return k | bit(zw_test_coin_units(m), 27);
 }
 
 void zw_diagnostics(const struct zw_model *m, char *buf, size_t cap)

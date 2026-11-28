@@ -59,7 +59,7 @@ static bool bal_cell(void *ctx, size_t row, size_t col, char *buf, size_t cap, e
         snprintf(buf, cap, "%s\t%s", pill_label(r->kind), r->addr);
         *style = r->kind == ZW_ADDR_PUBLIC ? GS_PILL_PUBLIC : GS_PILL_PRIVATE;
     } else {
-        zw_amount_format_net(r->zat, buf, cap, m->testnet);
+        zw_amount_format_net(r->zat, buf, cap, zw_test_coin_units(m));
         *style = r->unconfirmed ? GS_WARN_TEXT : GS_AMOUNT_MONO;
     }
     return true;
@@ -280,9 +280,9 @@ static void hero_texts(const struct zw_model *m, struct gui_ui *ui, int64_t now_
                    "connected to its node.");
         return;
     }
-    zw_amount_format_net(m->wallet.spendable, a, sizeof(a), m->testnet);
+    zw_amount_format_net(m->wallet.spendable, a, sizeof(a), zw_test_coin_units(m));
     gui_ui_set(ui, "home.private", a);
-    zw_amount_format_net(m->wallet.total, a, sizeof(a), m->testnet);
+    zw_amount_format_net(m->wallet.total, a, sizeof(a), zw_test_coin_units(m));
     snprintf(t, sizeof(t), "Total: %s", a);
     gui_ui_set(ui, "home.total", t);
     if (m->conn == ZW_CONN_ONLINE) snprintf(t, sizeof(t), "Updating" ELLIPSIS " not final yet");
@@ -295,7 +295,7 @@ void zw_home_publish(const struct zw_model *m, struct gui_ui *ui, int64_t now_s)
     char a[64], t[200];
     sync_texts(m, ui, now_s);
     hero_texts(m, ui, now_s);
-    zw_amount_format_net(m->wallet.publicf, a, sizeof(a), m->testnet);
+    zw_amount_format_net(m->wallet.publicf, a, sizeof(a), zw_test_coin_units(m));
     snprintf(t, sizeof(t), "%s is PUBLIC and visible to everyone.", a);
     gui_ui_set(ui, "home.fixit", t);
 }

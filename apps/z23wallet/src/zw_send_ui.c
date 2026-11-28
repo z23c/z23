@@ -131,7 +131,7 @@ static void view_from(struct zw_send *s, const struct zw_model *m, struct zw_sen
         if (v->nfrom == ZW_FROM_ITEMS) { v->from_more++; continue; }
         zw_decimal(r->zat, d, sizeof(d));
         elide_middle(r->addr, el, sizeof(el));
-        snprintf(v->from_items[v->nfrom], sizeof(v->from_items[0]), "%s(%s %s)", el, d, m->testnet ? "ZCT" : "ZCL");
+        snprintf(v->from_items[v->nfrom], sizeof(v->from_items[0]), "%s(%s %s)", el, d, v->unit);
         snprintf(s->from_addr[v->nfrom], sizeof(s->from_addr[0]), "%s", r->addr);
         if (!strcmp(r->addr, s->form.from)) snprintf(v->from_label, sizeof(v->from_label), "%s", v->from_items[v->nfrom]);
         v->nfrom++;
@@ -144,9 +144,9 @@ static void view_avail(const struct zw_send *s, const struct zw_model *m, struct
     const struct zw_bal_row *r = row_of(m, s->form.from);
     int64_t spend = r ? r->confirmed_zat : 0, pending = r ? r->zat - r->confirmed_zat : 0;
     char a[48], p[48];
-    zw_amount_format_net(spend, a, sizeof(a), m->testnet);
+    zw_amount_format_net(spend, a, sizeof(a), zw_test_coin_units(m));
     if (pending > 0) {
-        zw_amount_format_net(pending, p, sizeof(p), m->testnet);
+        zw_amount_format_net(pending, p, sizeof(p), zw_test_coin_units(m));
         snprintf(v->avail, sizeof(v->avail), "%s (+%s confirming)", a, p);
     } else {
         snprintf(v->avail, sizeof(v->avail), "%s", a);
@@ -202,12 +202,13 @@ static void make_view(struct zw_send *s, const struct zw_model *m)
 {
     struct zw_send_view *v = &s->view;
     memset(v, 0, sizeof(*v));
+    snprintf(v->unit, sizeof(v->unit), "%s", zw_test_coin_units(m) ? "ZCT" : "ZCL");
     enum gui_style bs;
     snprintf(v->badge, sizeof(v->badge), "%s", zw_send_badge(&s->form, &bs));
     v->badge_style = (uint8_t)bs;
     view_from(s, m, v);
     view_avail(s, m, v);
-    zw_send_totals(&s->form, m->testnet, v->totals, sizeof(v->totals));
+    zw_send_totals(&s->form, zw_test_coin_units(m), v->totals, sizeof(v->totals));
     zw_decimal(s->form.fee, v->fee, sizeof(v->fee));
     v->nrcpt = (uint8_t)s->shown;
     for (size_t i = 0; i < s->shown; i++) view_recipient(s, m, i, v);

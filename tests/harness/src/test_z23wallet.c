@@ -1431,6 +1431,40 @@ static void test_home_synced(void)
     scene_free(&s);
 }
 
+static void test_reported_coin_units(void)
+{
+    static const struct { const char *chain, *amount; bool locator_testnet; } cases[] = {
+        {"main", "12.5 ZCL", true}, {"regtest", "12.5 ZCL", true},
+        {"test", "12.5 ZCT", false}, {"ironwood", "12.5 ZCT", false}
+    };
+    struct scene s = {0};
+    model_from(&s.m, "home_synced", "reported_units", ZW_PROFILE_AUTO);
+    scene_render(&s, ZW_SCREEN_HOME, 1100, 720, 1.0f);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        s.m.conn = ZW_CONN_ONLINE;
+        s.m.testnet = cases[i].locator_testnet;
+        s.m.chain.chain[0] = 0;
+        zw_home_publish(&s.m, s.ui, NOW_S);
+        CHECK("balances use the configured denomination before chain identity arrives",
+              !strcmp(gui_ui_get(s.ui, "home.private"), s.m.testnet ? "12.5 ZCT" : "12.5 ZCL"));
+        uint64_t before = zw_structure_key(&s.m, ZW_SCREEN_SEND);
+        struct zw_result r = {.kind = ZW_Q_CHAIN, .generation = s.m.generation, .port = s.m.port,
+                              .profile = s.m.profile, .testnet = s.m.testnet, .chain = s.m.chain};
+        snprintf(r.datadir, sizeof(r.datadir), "%s", s.m.datadir);
+        snprintf(r.chain.chain, sizeof(r.chain.chain), "%s", cases[i].chain);
+        zw_model_apply(&s.m, &r);
+        zw_home_publish(&s.m, s.ui, NOW_S);
+        CHECK("reported chain repaints funded amounts and static units, preserving the endpoint",
+              s.m.testnet == cases[i].locator_testnet && before != zw_structure_key(&s.m, ZW_SCREEN_SEND) &&
+              !strcmp(gui_ui_get(s.ui, "home.private"), cases[i].amount));
+        s.m.conn = ZW_CONN_REFUSED;
+        zw_home_publish(&s.m, s.ui, NOW_S);
+        CHECK("cached balance keeps its reported denomination during a disconnect",
+              !strcmp(gui_ui_get(s.ui, "home.private"), cases[i].amount));
+    }
+    scene_free(&s);
+}
+
 static void test_home_states(void)
 {
     struct scene s = {0};
@@ -1818,6 +1852,7 @@ int test_z23wallet(void)
     test_worker();
     test_shell();
     test_home_synced();
+    test_reported_coin_units();
     test_home_states();
     test_home_no_node();
     test_home_layout();

@@ -95,7 +95,7 @@ static void recipient_second_row(struct gui_tree *t, const struct zw_send_view *
     gui_attr(t, GUI_A_W, 200);
     if (i == 0 && v->max_on) gui_flag(t, GUI_F_DISABLED); /* read-only while Send all is on */
     snprintf(id, sizeof(id), "s_r%zu_unit", i + 1);
-    label(t, id, "ZCL", 0);
+    label(t, id, v->unit, 0);
     gui_spacer(t, 1);
     if (i == 0) {
         gui_button(t, "s_max1", v->max_on ? GS_BUTTON_PRIMARY : GS_BUTTON_SECONDARY, "Send all", "send.max");
@@ -143,7 +143,7 @@ static void fee_and_buttons(struct gui_tree *t, const struct zw_send_view *v)
     gui_input(t, "s_fee", GUI_IN_AMOUNT, "", "", ZW_AMOUNT_TEXT - 6);
     gui_attr(t, GUI_A_W, 120);
     gui_flag(t, GUI_F_DISABLED);
-    label(t, "s_fee_unit", "ZCL", 0);
+    label(t, "s_fee_unit", v->unit, 0);
     gui_spacer(t, 1);
     gui_end(t);
     gui_text(t, "s_totals", GS_BODY, v->totals);
@@ -236,7 +236,7 @@ static void confirm_rows(struct gui_tree *t, const struct zw_send *s, const stru
         zw_amount_text(s->pending.to[i].amount, &z);
         total += z;
         split_addr(trimmed, addr, sizeof(addr));
-        zw_money(z, m->testnet, amt, sizeof(amt));
+        zw_money(z, zw_test_coin_units(m), amt, sizeof(amt));
         snprintf(id, sizeof(id), "sc_to%zu", i + 1);
         amount_row(t, id, addr, amt, GS_BODY);
         if (trimmed[0] == 'z' && ml) {
@@ -245,9 +245,9 @@ static void confirm_rows(struct gui_tree *t, const struct zw_send *s, const stru
             gui_flag(t, GUI_F_WRAP | GUI_F_SELECTABLE);
         }
     }
-    zw_money(s->pending.fee, m->testnet, amt, sizeof(amt));
+    zw_money(s->pending.fee, zw_test_coin_units(m), amt, sizeof(amt));
     amount_row(t, "sc_fee", "Miner Fee", amt, GS_BODY);
-    zw_money(total, m->testnet, amt, sizeof(amt));
+    zw_money(total, zw_test_coin_units(m), amt, sizeof(amt));
     amount_row(t, "sc_total", "Total", amt, GS_AMOUNT);
 }
 
@@ -294,7 +294,7 @@ static void confirm_dialog(struct gui_tree *t, const struct zw_send *s, const st
     char from[2 * ZW_ADDR_MAX], amount[64], send[96];
     int64_t sum = 0;
     zw_send_amounts(&s->pending, &sum);
-    zw_money(sum, m->testnet, amount, sizeof(amount));
+    zw_money(sum, zw_test_coin_units(m), amount, sizeof(amount));
     snprintf(send, sizeof(send), "Send %s", amount);
     gui_dialog_open(t, "s_conf", zw_send_confirm_title(s->pending_cat), "send.close", 620);
     gui_text(t, "sc_badge", tones[s->pending_cat], badges[s->pending_cat]);

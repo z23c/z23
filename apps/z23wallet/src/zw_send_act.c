@@ -160,7 +160,7 @@ static bool validate_form(struct zw_send *s, const struct zw_send_env *env)
 {
     char err[400];
     struct zw_funds f = funds_of(env->m, s->form.from);
-    if (zw_send_validate(&s->form, &f, is_syncing(env->m, env->now_s), env->m->testnet, err, sizeof(err)))
+    if (zw_send_validate(&s->form, &f, is_syncing(env->m, env->now_s), zw_test_coin_units(env->m), err, sizeof(err)))
         return true;
     open_dlg(s, ZW_DLG_ERROR, "Transaction Error", err);
     gui_ui_focus(env->ui, "se_ok");
