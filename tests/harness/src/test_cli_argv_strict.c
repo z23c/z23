@@ -1826,8 +1826,11 @@ static int cas_test_research_empty_mode(void)
         ASSERT(snprintf(dir, sizeof(dir), "%s/ironwood-research", home) > 0);
         ASSERT(snprintf(flag, sizeof(flag), "-datadir=%s", home) > 0);
         ASSERT(mkdir(dir, 0755) == 0 && chmod(dir, 0755) == 0);
+        /* Consent precedes identity: without a pinned catalog the launch stops
+         * before the directory is made private. */
         char *argv[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
-                        flag, (char *)"-help", NULL};
+                        flag, (char *)"-testballotcatalog=0000000000000000000000000000000000000000000000000000000000000000",
+                        (char *)"-help", NULL};
         int rc = cas_run(argv, home, out, sizeof(out));
         struct stat st;
         bool private = stat(dir, &st) == 0 && (st.st_mode & 0777) == 0700;
@@ -1939,13 +1942,17 @@ static int cas_test_research_private_directory(void)
         ASSERT(snprintf(marker, sizeof(marker), "%s/.z23-research-profile", target) > 0);
         ASSERT(snprintf(flag, sizeof(flag), "-datadir=%s", home) > 0);
         ASSERT(mkdir(target, 0700) == 0 && symlink(target, dir) == 0);
+        /* Consent precedes identity, so the refusal asserted here is the
+         * linked-directory one and not the missing-catalog one. */
         char *argv[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
-                        flag, (char *)"-help", NULL};
+                        flag, (char *)"-testballotcatalog=0000000000000000000000000000000000000000000000000000000000000000",
+                        (char *)"-help", NULL};
         int rc = cas_run(argv, home, out, sizeof(out));
         struct stat st;
         bool no_marker = lstat(marker, &st) != 0 && errno == ENOENT;
+        bool identity_refused = strstr(out, "identity is missing or invalid") != NULL;
         (void)test_rm_rf_recursive(home);
-        ASSERT(rc != 0 && no_marker);
+        ASSERT(rc != 0 && no_marker && identity_refused);
         PASS();
     } _test_next:;
     return failures;
