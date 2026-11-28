@@ -56,13 +56,11 @@ static inline size_t research_block_size_limit_for(const struct chain_params *pa
  * measured here (serialized into a fixed-capacity buffer, to bound memory);
  * any other limit is left to the chain's existing validation and
  * classifies OK. A zero limit classifies UNAVAILABLE. */
-static inline enum research_block_size_verdict research_block_size_check_under(
+static inline enum research_block_size_verdict research_block_size_measure(
     const struct block *block, size_t limit)
 {
-    if (!limit || !block)
+    if (!limit || limit == SIZE_MAX || !block)
         return RESEARCH_BLOCK_SIZE_UNAVAILABLE;
-    if (limit != RESEARCH_BLOCK_SIZE_LIMIT)
-        return RESEARCH_BLOCK_SIZE_OK;
     if (block->header.nSolutionSize > MAX_SOLUTION_SIZE)
         return RESEARCH_BLOCK_SIZE_UNAVAILABLE;
     unsigned char *bytes = zcl_malloc(limit + 1, "research block size");
@@ -78,6 +76,28 @@ static inline enum research_block_size_verdict research_block_size_check_under(
     if (exceeded)
         return RESEARCH_BLOCK_SIZE_EXCEEDED;
     return ok ? RESEARCH_BLOCK_SIZE_OK : RESEARCH_BLOCK_SIZE_UNAVAILABLE;
+}
+
+static inline enum research_block_size_verdict research_block_size_check_under(
+    const struct block *block, size_t limit)
+{
+    if (!limit || !block)
+        return RESEARCH_BLOCK_SIZE_UNAVAILABLE;
+    if (limit != RESEARCH_BLOCK_SIZE_LIMIT)
+        return RESEARCH_BLOCK_SIZE_OK;
+    return research_block_size_measure(block, limit);
+}
+
+/* Before branch rules are available, only the historical ceiling applies. */
+static inline enum research_block_size_verdict research_block_size_check_ceiling(
+    const struct chain_params *params, const struct block *block)
+{
+    size_t limit = research_block_size_limit(params);
+    if (!limit || !block)
+        return RESEARCH_BLOCK_SIZE_UNAVAILABLE;
+    if (limit != RESEARCH_BLOCK_SIZE_LIMIT)
+        return RESEARCH_BLOCK_SIZE_OK;
+    return research_block_size_measure(block, research_block_size_ceiling(params));
 }
 
 /* The research limit whatever the resolved rules say. Callers that can
