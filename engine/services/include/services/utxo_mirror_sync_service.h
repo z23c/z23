@@ -246,7 +246,8 @@ int utxo_mirror_rebuild_request(struct utxo_mirror_sync_service *svc,
 
 /* Schedule a quarantined authority rewind, respecting the per-instance window.
  * The job always uses the same authority-verified path as operator repair. */
-void utxo_mirror_rewind_request_if_due(struct utxo_mirror_sync_service *svc);
+struct zcl_result utxo_mirror_rewind_request_if_due(
+    struct utxo_mirror_sync_service *svc);
 
 /* Copy the current job record (consistent snapshot). */
 void utxo_mirror_rebuild_job_snapshot(struct utxo_mirror_sync_service *svc,

@@ -955,13 +955,20 @@ static bool mirror_sync_ndb_unavailable(
     return !svc || !svc->ndb || !svc->ndb->open;
 }
 
+static void mirror_sync_schedule_rewind(struct utxo_mirror_sync_service *svc)
+{
+    struct zcl_result result = utxo_mirror_rewind_request_if_due(svc);
+    if (!result.ok)
+        LOG_WARN("utxo_mirror", "%s", result.message);
+}
+
 static bool mirror_sync_pass_suspended(
     struct utxo_mirror_sync_service *svc)
 {
     if (atomic_load(&svc->mirror_health) == UTXO_MIRROR_QUARANTINED) {
         if ((atomic_load(&svc->quarantine_cause_state) & UINT64_C(3)) ==
             UTXO_MIRROR_CAUSE_AUTHORITY_REWIND)
-            utxo_mirror_rewind_request_if_due(svc);
+            mirror_sync_schedule_rewind(svc);
         return true;
     }
     /* During a from-genesis refold the coins_kv frontier climbs every pass, so
@@ -1057,7 +1064,7 @@ static void mirror_sync_request_changed_branch(
     struct utxo_mirror_sync_service *svc, bool changed)
 {
     if (changed)
-        utxo_mirror_rewind_request_if_due(svc);
+        mirror_sync_schedule_rewind(svc);
 }
 
 int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
@@ -1095,7 +1102,7 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
         atomic_fetch_add(&svc->quarantines_total, 1);
         atomic_store(&svc->last_quarantine_unix,
                      platform_time_wall_unix());
-        utxo_mirror_rewind_request_if_due(svc);
+        mirror_sync_schedule_rewind(svc);
         LOG_RETURN(-1, "utxo_mirror",
                    "run_once: mirror cursor=%lld is ahead of next-height "
                    "authority frontier=%d after an authority rewind; mirror "

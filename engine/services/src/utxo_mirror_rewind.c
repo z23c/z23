@@ -8,15 +8,14 @@
 
 #define MIRROR_REWIND_WINDOW_MS INT64_C(60000)
 
-void utxo_mirror_rewind_request_if_due(struct utxo_mirror_sync_service *svc)
+struct zcl_result utxo_mirror_rewind_request_if_due(
+    struct utxo_mirror_sync_service *svc)
 {
     if (!atomic_load(&svc->thread_started) || atomic_load(&svc->stop_requested))
-        return;
+        return ZCL_OK;
     int64_t now = platform_time_monotonic_ms();
-    if (now <= 0) {
-        LOG_WARN("utxo_mirror", "rewind rebuild refused: monotonic clock unavailable");
-        return;
-    }
+    if (now <= 0)
+        return ZCL_ERR(-1, "rewind rebuild refused: monotonic clock unavailable");
     int64_t last = atomic_load(&svc->auto_rewind_last_ms);
     for (;;) {
         if (last && (now < last || now - last < MIRROR_REWIND_WINDOW_MS)) {
@@ -26,11 +25,15 @@ void utxo_mirror_rewind_request_if_due(struct utxo_mirror_sync_service *svc)
                 LOG_WARN("utxo_mirror",
                          "rewind rebuild throttled; mirror remains quarantined (repeats=%llu)",
                          (unsigned long long)reps);
-            return;
+            return ZCL_OK;
         }
         if (atomic_compare_exchange_weak(&svc->auto_rewind_last_ms, &last, now))
             break;
     }
-    if (utxo_mirror_rebuild_request(svc, NULL) != 0)
+    int rc = utxo_mirror_rebuild_request(svc, NULL);
+    if (rc != 0)
         (void)atomic_compare_exchange_strong(&svc->auto_rewind_last_ms, &now, last);
+    if (rc < 0)
+        return ZCL_ERR(-1, "rewind rebuild request failed");
+    return ZCL_OK;
 }
