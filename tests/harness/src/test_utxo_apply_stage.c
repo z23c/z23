@@ -648,42 +648,42 @@ static bool uv_append_bare_tx(struct block *b, int h)
 /* Build an opaque, structurally parseable Ironwood carrier with n actions.
  * The reducer under test consumes only action nullifiers; no proof validity is
  * claimed by this fixture or by its admission directly into the stage body. */
-static bool uv_add_ironwood_actions(struct transaction *tx,
-                                    const uint8_t *tags, size_t n,
-                                    uint8_t mark)
+static bool uv_ironwood_original_view(struct v6_wire_view *original)
 {
-    if (!tx || !tags || n == 0 || n >= 253)
-        return false;
-    struct v6_wire_view original;
-    if (v6_core_parse(ironwood_anchor_a, sizeof ironwood_anchor_a,
-                      &original) != V6_WIRE_OK ||
-        original.ironwood.count != 1 ||
-        original.ironwood.actions.size != 820 ||
-        original.ironwood.signatures.size != 64 ||
-        original.ironwood.binding_signature.size != 64)
-        return false;
+    return v6_core_parse(ironwood_anchor_a, sizeof ironwood_anchor_a,
+                         original) == V6_WIRE_OK &&
+        original->ironwood.count == 1 &&
+        original->ironwood.actions.size == 820 &&
+        original->ironwood.signatures.size == 64 &&
+        original->ironwood.binding_signature.size == 64;
+}
+
+static uint8_t *uv_build_ironwood_wire(const struct v6_wire_view *original,
+                                       const uint8_t *tags, size_t n,
+                                       uint8_t mark, size_t *size_out)
+{
     const uint8_t *base = ironwood_anchor_a;
-    size_t prefix = (size_t)(original.ironwood.actions.data - base);
-    size_t tail = (size_t)(original.ironwood.flags.data - base);
-    size_t signatures = (size_t)(original.ironwood.signatures.data - base);
-    size_t binding = (size_t)(original.ironwood.binding_signature.data - base);
-    size_t action_size = original.ironwood.actions.size;
-    size_t signature_size = original.ironwood.signatures.size;
+    size_t prefix = (size_t)(original->ironwood.actions.data - base);
+    size_t tail = (size_t)(original->ironwood.flags.data - base);
+    size_t signatures = (size_t)(original->ironwood.signatures.data - base);
+    size_t binding = (size_t)(original->ironwood.binding_signature.data - base);
+    size_t action_size = original->ironwood.actions.size;
+    size_t signature_size = original->ironwood.signatures.size;
     if (!prefix || base[prefix - 1] != 1 || tail <= prefix ||
         signatures < tail || binding < signatures ||
         n - 1 > (SIZE_MAX - sizeof ironwood_anchor_a) /
             (action_size + signature_size))
-        return false;
+        return NULL;
     size_t size = sizeof ironwood_anchor_a +
         (n - 1) * (action_size + signature_size);
     uint8_t *wire = zcl_malloc(size, "uv_iw_wire");
     if (!wire)
-        return false;
+        return NULL;
     memcpy(wire, base, prefix);
     wire[prefix - 1] = (uint8_t)n;
     for (size_t i = 0; i < n; i++) {
         size_t at = prefix + i * action_size;
-        memcpy(wire + at, original.ironwood.actions.data, action_size);
+        memcpy(wire + at, original->ironwood.actions.data, action_size);
         uv_nf_bytes(wire + at + 32, tags[i], mark);
     }
     size_t new_tail = prefix + n * action_size;
@@ -692,11 +692,17 @@ static bool uv_add_ironwood_actions(struct transaction *tx,
     size_t new_signatures = new_tail + middle_size;
     for (size_t i = 0; i < n; i++)
         memcpy(wire + new_signatures + i * signature_size,
-               original.ironwood.signatures.data, signature_size);
+               original->ironwood.signatures.data, signature_size);
     size_t new_binding = new_signatures + n * signature_size;
     memcpy(wire + new_binding, base + binding,
-           original.ironwood.binding_signature.size);
+           original->ironwood.binding_signature.size);
+    *size_out = size;
+    return wire;
+}
 
+static bool uv_ironwood_wire_valid(const uint8_t *wire, size_t size,
+                                   const uint8_t *tags, size_t n, uint8_t mark)
+{
     struct v6_wire_view check;
     bool ok = v6_core_parse(wire, size, &check) == V6_WIRE_OK &&
         check.ironwood.count == n;
@@ -708,6 +714,23 @@ static bool uv_add_ironwood_actions(struct transaction *tx,
             action.nullifier.size == sizeof expected &&
             memcmp(action.nullifier.data, expected, sizeof expected) == 0;
     }
+    return ok;
+}
+
+static bool uv_add_ironwood_actions(struct transaction *tx,
+                                    const uint8_t *tags, size_t n,
+                                    uint8_t mark)
+{
+    if (!tx || !tags || n == 0 || n >= 253)
+        return false;
+    struct v6_wire_view original;
+    if (!uv_ironwood_original_view(&original))
+        return false;
+    size_t size = 0;
+    uint8_t *wire = uv_build_ironwood_wire(&original, tags, n, mark, &size);
+    if (!wire)
+        return false;
+    bool ok = uv_ironwood_wire_valid(wire, size, tags, n, mark);
     if (ok) {
         tx->overwintered = true;
         tx->version = IRONWOOD_TX_VERSION;
@@ -731,48 +754,72 @@ static bool uv_add_malformed_ironwood(struct transaction *tx)
 /* Add two structurally parseable 96-byte v6 Sapling spends with the same
  * nullifier alongside one Ironwood action. Proof bytes remain zero: this is a
  * reducer refusal fixture, not a validity-bearing transaction. */
+enum { UV_V6_SPEND = 96, UV_V6_PROOF = 192, UV_V6_SIGNATURE = 64 };
+
+static bool uv_mixed_v6_original_view(struct v6_wire_view *original)
+{
+    return v6_core_parse(ironwood_anchor_a, sizeof ironwood_anchor_a,
+                         original) == V6_WIRE_OK &&
+        !original->sapling_spends.count && !original->sapling_outputs.count &&
+        !original->orchard.count && original->ironwood.count == 1 &&
+        original->sapling_tail.size == 0 &&
+        original->sapling_spends.wire.data && original->sapling_tail.data;
+}
+
+static uint8_t *uv_build_mixed_v6_wire(const struct v6_wire_view *original,
+                                       uint8_t sapling_tag, uint8_t mark,
+                                       size_t *size_out)
+{
+    const uint8_t *base = ironwood_anchor_a;
+    size_t spends = (size_t)(original->sapling_spends.wire.data - base);
+    size_t tail = (size_t)(original->sapling_tail.data - base);
+    size_t tail_size = 8 + 32 + 2 * UV_V6_PROOF + 2 * UV_V6_SIGNATURE +
+        UV_V6_SIGNATURE;
+    if (!spends || base[spends - 1] != 0 || tail < spends ||
+        tail > sizeof ironwood_anchor_a ||
+        tail_size > SIZE_MAX - sizeof ironwood_anchor_a - 2 * UV_V6_SPEND)
+        return NULL;
+    size_t size = sizeof ironwood_anchor_a + 2 * UV_V6_SPEND + tail_size;
+    uint8_t *wire = zcl_calloc(size, 1, "uv_v6_mixed");
+    if (!wire)
+        return NULL;
+    memcpy(wire, base, spends);
+    wire[spends - 1] = 2;
+    for (size_t i = 0; i < 2; i++)
+        uv_nf_bytes(wire + spends + i * UV_V6_SPEND + 32, sapling_tag, mark);
+    memcpy(wire + spends + 2 * UV_V6_SPEND, base + spends, tail - spends);
+    size_t new_tail = tail + 2 * UV_V6_SPEND;
+    memcpy(wire + new_tail + tail_size, base + tail,
+           sizeof ironwood_anchor_a - tail);
+    *size_out = size;
+    return wire;
+}
+
+static bool uv_mixed_v6_wire_valid(const uint8_t *wire, size_t size,
+                                   struct v6_wire_view *check)
+{
+    return v6_core_parse(wire, size, check) == V6_WIRE_OK &&
+        check->sapling_spends.count == 2 &&
+        check->sapling_spends.wire.size == 2 * UV_V6_SPEND &&
+        !check->orchard.count && check->ironwood.count == 1 &&
+        memcmp(check->sapling_spends.wire.data + 32,
+               check->sapling_spends.wire.data + UV_V6_SPEND + 32, 32) == 0;
+}
+
 static bool uv_add_mixed_v6_repeated_sapling(struct transaction *tx,
                                              uint8_t sapling_tag,
                                              uint8_t ironwood_tag,
                                              uint8_t mark)
 {
-    enum { SPEND = 96, PROOF = 192, SIGNATURE = 64 };
     struct v6_wire_view original;
-    if (v6_core_parse(ironwood_anchor_a, sizeof ironwood_anchor_a,
-                      &original) != V6_WIRE_OK ||
-        original.sapling_spends.count || original.sapling_outputs.count ||
-        original.orchard.count || original.ironwood.count != 1 ||
-        original.sapling_tail.size != 0 ||
-        !original.sapling_spends.wire.data || !original.sapling_tail.data)
+    if (!uv_mixed_v6_original_view(&original))
         return false;
-    const uint8_t *base = ironwood_anchor_a;
-    size_t spends = (size_t)(original.sapling_spends.wire.data - base);
-    size_t tail = (size_t)(original.sapling_tail.data - base);
-    size_t tail_size = 8 + 32 + 2 * PROOF + 2 * SIGNATURE + SIGNATURE;
-    if (!spends || base[spends - 1] != 0 || tail < spends ||
-        tail > sizeof ironwood_anchor_a ||
-        tail_size > SIZE_MAX - sizeof ironwood_anchor_a - 2 * SPEND)
-        return false;
-    size_t size = sizeof ironwood_anchor_a + 2 * SPEND + tail_size;
-    uint8_t *wire = zcl_calloc(size, 1, "uv_v6_mixed");
+    size_t size = 0;
+    uint8_t *wire = uv_build_mixed_v6_wire(&original, sapling_tag, mark, &size);
     if (!wire)
         return false;
-    memcpy(wire, base, spends);
-    wire[spends - 1] = 2;
-    for (size_t i = 0; i < 2; i++)
-        uv_nf_bytes(wire + spends + i * SPEND + 32, sapling_tag, mark);
-    memcpy(wire + spends + 2 * SPEND, base + spends, tail - spends);
-    size_t new_tail = tail + 2 * SPEND;
-    memcpy(wire + new_tail + tail_size, base + tail,
-           sizeof ironwood_anchor_a - tail);
-
     struct v6_wire_view check;
-    bool ok = v6_core_parse(wire, size, &check) == V6_WIRE_OK &&
-        check.sapling_spends.count == 2 &&
-        check.sapling_spends.wire.size == 2 * SPEND &&
-        !check.orchard.count && check.ironwood.count == 1 &&
-        memcmp(check.sapling_spends.wire.data + 32,
-               check.sapling_spends.wire.data + SPEND + 32, 32) == 0;
+    bool ok = uv_mixed_v6_wire_valid(wire, size, &check);
     struct v6_action_view action;
     ok = ok && v6_core_bundle_action(&check.ironwood, 0, &action);
     if (ok) {

@@ -128,23 +128,49 @@ static bool check_empty_rpc(void)
     return ok;
 }
 
-static bool check_action_values(const struct v6_bundle *bundle, const struct v6_wire_view *original)
+static bool check_action_bundle_layout(const struct v6_bundle *bundle,
+                                       const struct v6_action_view *first)
+{
+    return bundle->flags.size == 1 && bundle->binding_signature.size == 64 &&
+        bundle->signatures.size == 128 && first->cv.data == bundle->actions.data &&
+        first->rk.data == bundle->actions.data + 64 && first->cv.size == 32 &&
+        first->rk.size == 32;
+}
+
+static bool check_action_signature_layout(const struct v6_bundle *bundle,
+                                          const struct v6_action_view *first,
+                                          const struct v6_action_view *second)
+{
+    return first->signature.data == bundle->signatures.data &&
+        first->signature.size == 64 &&
+        second->signature.data == bundle->signatures.data + 64 &&
+        second->signature.size == 64 && first->nullifier.size == 32 &&
+        first->cmx.size == 32 && second->nullifier.size == 32 &&
+        second->cmx.size == 32;
+}
+
+static bool check_action_contents(const struct v6_wire_view *original,
+                                  const struct v6_action_view *first,
+                                  const struct v6_action_view *second)
+{
+    if (memcmp(first->nullifier.data, original->ironwood.actions.data + 32, 32) ||
+        memcmp(first->cmx.data, original->ironwood.actions.data + 96, 32))
+        return false;
+    for (size_t i = 0; i < 32; ++i)
+        if (second->nullifier.data[i] != 0x27 || second->cmx.data[i] != 0x64)
+            return false;
+    return true;
+}
+
+static bool check_action_values(const struct v6_bundle *bundle,
+                                const struct v6_wire_view *original)
 {
     struct v6_action_view first, second;
     if (!v6_bundle_action(bundle, 0, &first) ||
         !v6_bundle_action(bundle, 1, &second)) return false;
-    if (bundle->flags.size != 1 || bundle->binding_signature.size != 64 ||
-        bundle->signatures.size != 128 || first.cv.data != bundle->actions.data ||
-        first.rk.data != bundle->actions.data + 64 || first.cv.size != 32 || first.rk.size != 32 ||
-        first.signature.data != bundle->signatures.data || first.signature.size != 64 ||
-        second.signature.data != bundle->signatures.data + 64 || second.signature.size != 64 ||
-        first.nullifier.size != 32 || first.cmx.size != 32 ||
-        second.nullifier.size != 32 || second.cmx.size != 32 ||
-        memcmp(first.nullifier.data, original->ironwood.actions.data + 32, 32) ||
-        memcmp(first.cmx.data, original->ironwood.actions.data + 96, 32)) return false;
-    for (size_t i = 0; i < 32; ++i)
-        if (second.nullifier.data[i] != 0x27 || second.cmx.data[i] != 0x64) return false;
-    return true;
+    return check_action_bundle_layout(bundle, &first) &&
+        check_action_signature_layout(bundle, &first, &second) &&
+        check_action_contents(original, &first, &second);
 }
 static bool check_action_failures(const struct v6_wire_view *v, const struct v6_wire_view *absent)
 {
@@ -189,6 +215,25 @@ static bool check_action_views(void)
     return ok;
 }
 
+static bool check_statement_flag(const struct v6_wire_view *v, unsigned f,
+                                 uint8_t out[V6_IRONWOOD_STATEMENT_SIZE])
+{
+    return v6_ironwood_statement(v, 0, out, V6_IRONWOOD_STATEMENT_SIZE) &&
+        !memcmp(out, v->ironwood.anchor.data, 32) &&
+        !memcmp(out + 32, v->ironwood.actions.data, 128) &&
+        out[160] == (f & 1u) && out[161] == ((f >> 1) & 1u) &&
+        out[162] == ((f & 4u) == 0);
+}
+
+static bool check_statement_invalid_calls(const struct v6_wire_view *v,
+                                          uint8_t out[V6_IRONWOOD_STATEMENT_SIZE])
+{
+    return !v6_ironwood_statement(v, 0, out, V6_IRONWOOD_STATEMENT_SIZE - 1) &&
+        !v6_ironwood_statement(v, 1, out, V6_IRONWOOD_STATEMENT_SIZE) &&
+        !v6_ironwood_statement(NULL, 0, out, V6_IRONWOOD_STATEMENT_SIZE) &&
+        !v6_ironwood_statement(v, 0, NULL, V6_IRONWOOD_STATEMENT_SIZE);
+}
+
 static bool check_statement_views(void)
 {
     uint8_t wire[sizeof ironwood_anchor_a], out[V6_IRONWOOD_STATEMENT_SIZE];
@@ -198,17 +243,10 @@ static bool check_statement_views(void)
     uint8_t *flags = (uint8_t *)v.ironwood.flags.data;
     for (unsigned f = 0; f < 8; ++f) {
         *flags = (uint8_t)f;
-        if (!v6_ironwood_statement(&v, 0, out, sizeof out) ||
-            memcmp(out, v.ironwood.anchor.data, 32) ||
-            memcmp(out + 32, v.ironwood.actions.data, 128) ||
-            out[160] != (f & 1u) || out[161] != ((f >> 1) & 1u) ||
-            out[162] != ((f & 4u) == 0)) return false;
+        if (!check_statement_flag(&v, f, out)) return false;
     }
     memset(out, 0xa5, sizeof out);
-    if (v6_ironwood_statement(&v, 0, out, sizeof out - 1) ||
-        v6_ironwood_statement(&v, 1, out, sizeof out) ||
-        v6_ironwood_statement(NULL, 0, out, sizeof out) ||
-        v6_ironwood_statement(&v, 0, NULL, sizeof out)) return false;
+    if (!check_statement_invalid_calls(&v, out)) return false;
     v.ironwood.flags.size = 0;
     if (v6_ironwood_statement(&v, 0, out, sizeof out)) return false;
     for (size_t i = 0; i < sizeof out; ++i) if (out[i] != 0xa5) return false;
@@ -292,34 +330,49 @@ static bool check_invalid_wire(void)
     memmove(bad + 23, bad + 21, 5); bad[20] = 253; bad[21] = 0; bad[22] = 0;
     return v6_wire_parse(bad, sizeof bad, &v) == V6_WIRE_NONCANONICAL;
 }
+static bool check_prefix_frames_valid(uint8_t *frames, size_t frames_size,
+                                      struct v6_wire_view *v, size_t *consumed)
+{
+    *consumed = 99;
+    if (v6_wire_parse_prefix(frames, frames_size, v, consumed) != V6_WIRE_OK ||
+        *consumed != sizeof empty || v->header.data != frames) return false;
+    if (v6_wire_parse_prefix(frames + *consumed, sizeof empty, v, consumed) != V6_WIRE_OK ||
+        *consumed != sizeof empty) return false;
+    return v6_wire_parse(frames, frames_size, v) == V6_WIRE_TRAILING &&
+        !v->header.data && !v->transparent.data;
+}
+
+static bool check_prefix_frames_invalid(uint8_t *frames,
+                                        struct v6_wire_view *v,
+                                        size_t *consumed)
+{
+    *consumed = 99;
+    if (v6_wire_parse_prefix(frames, sizeof empty - 1, v, consumed) == V6_WIRE_OK ||
+        *consumed != 0 || v->header.data) return false;
+    *consumed = 99;
+    if (v6_wire_parse_prefix(NULL, sizeof empty, v, consumed) != V6_WIRE_TRUNCATED ||
+        *consumed != 0 || v->header.data) return false;
+    memset(v, 0xff, sizeof *v);
+    if (v6_wire_parse_prefix(frames, sizeof empty, v, NULL) != V6_WIRE_TRUNCATED ||
+        v->header.data || v->transparent.data) return false;
+    *consumed = 99;
+    return v6_wire_parse_prefix(frames, sizeof empty, NULL, consumed) == V6_WIRE_TRUNCATED &&
+           *consumed == 0;
+}
+
 static bool check_prefix_frames(void)
 {
     uint8_t frames[sizeof empty * 2];
     memcpy(frames, empty, sizeof empty);
     memcpy(frames + sizeof empty, empty, sizeof empty);
     struct v6_wire_view v;
-    size_t consumed = 99;
-    if (v6_wire_parse_prefix(frames, sizeof frames, &v, &consumed) != V6_WIRE_OK ||
-        consumed != sizeof empty || v.header.data != frames) return false;
-    if (v6_wire_parse_prefix(frames + consumed, sizeof empty, &v, &consumed) != V6_WIRE_OK ||
-        consumed != sizeof empty) return false;
-    if (v6_wire_parse(frames, sizeof frames, &v) != V6_WIRE_TRAILING ||
-        v.header.data || v.transparent.data) return false;
-    consumed = 99;
-    if (v6_wire_parse_prefix(frames, sizeof empty - 1, &v, &consumed) == V6_WIRE_OK ||
-        consumed != 0 || v.header.data) return false;
-    consumed = 99;
-    if (v6_wire_parse_prefix(NULL, sizeof empty, &v, &consumed) != V6_WIRE_TRUNCATED ||
-        consumed != 0 || v.header.data) return false;
-    memset(&v, 0xff, sizeof v);
-    if (v6_wire_parse_prefix(frames, sizeof empty, &v, NULL) != V6_WIRE_TRUNCATED ||
-        v.header.data || v.transparent.data) return false;
-    consumed = 99;
-    return v6_wire_parse_prefix(frames, sizeof empty, NULL, &consumed) == V6_WIRE_TRUNCATED &&
-           consumed == 0;
+    size_t consumed;
+    if (!check_prefix_frames_valid(frames, sizeof frames, &v, &consumed))
+        return false;
+    return check_prefix_frames_invalid(frames, &v, &consumed);
 }
 
-int test_transaction_v6_inspect(void)
+static int check_v6_rpc_cases(void)
 {
     int failures = 0;
     if (!check_v6_rpc_view()) ++failures;
@@ -327,6 +380,12 @@ int test_transaction_v6_inspect(void)
     if (!check_v6_rpc_projection_limit()) ++failures;
     if (!check_empty_rpc()) ++failures;
     if (!check_balance_cases()) ++failures;
+    return failures;
+}
+
+int test_transaction_v6_inspect(void)
+{
+    int failures = check_v6_rpc_cases();
     if (!check_action_views()) ++failures;
     if (!check_statement_views()) ++failures;
     if (!check_empty_view()) ++failures;

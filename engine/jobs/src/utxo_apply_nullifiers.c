@@ -411,20 +411,35 @@ static bool nf_check_one(sqlite3 *db, const uint8_t nf[32], int pool,
     return true;
 }
 
-static bool nf_v6_view(const struct transaction *tx,
-                       struct v6_wire_view *view)
+static bool nf_v6_public_metadata_valid(const struct transaction *tx)
+{
+    return tx->overwintered && tx->version == IRONWOOD_TX_VERSION &&
+        tx->version_group_id == IRONWOOD_VERSION_GROUP_ID;
+}
+
+static bool nf_v6_header_valid(const struct v6_wire_view *view)
 {
     static const uint8_t expected_header[8] = {
         6, 0, 0, 0x80, 0x98, 0xb6, 0x84, 0xd8
     };
+    return view->header.data && view->header.size == 20 &&
+        memcmp(view->header.data, expected_header, sizeof expected_header) == 0;
+}
+
+static bool nf_v6_bundles_supported(const struct v6_wire_view *view)
+{
+    return !view->sapling_spends.count && !view->orchard.count;
+}
+
+static bool nf_v6_view(const struct transaction *tx,
+                       struct v6_wire_view *view)
+{
     memset(view, 0, sizeof(*view));
     bool wire_present = tx->v6_wire.data || tx->v6_wire.size;
     bool v6_metadata = tx->overwintered && tx->version == IRONWOOD_TX_VERSION;
     if (!wire_present && !v6_metadata)
         return true;
-    if (!wire_present || !tx->overwintered ||
-        tx->version != IRONWOOD_TX_VERSION ||
-        tx->version_group_id != IRONWOOD_VERSION_GROUP_ID) {
+    if (!wire_present || !nf_v6_public_metadata_valid(tx)) {
         LOG_WARN(NF_SUBSYS,
                  "[utxo_apply] v6 wire metadata rejected: overwintered=%d "
                  "version=%d group=%08x", tx->overwintered ? 1 : 0,
@@ -433,16 +448,14 @@ static bool nf_v6_view(const struct transaction *tx,
     }
     enum v6_wire_error error =
         v6_core_parse(tx->v6_wire.data, tx->v6_wire.size, view);
-    if (error != V6_WIRE_OK || !view->header.data ||
-        view->header.size != 20 ||
-        memcmp(view->header.data, expected_header, sizeof expected_header) != 0) {
+    if (error != V6_WIRE_OK || !nf_v6_header_valid(view)) {
         LOG_WARN(NF_SUBSYS,
                  "[utxo_apply] malformed opaque v6 wire rejected: error=%d size=%zu",
                  (int)error, tx->v6_wire.size);
         memset(view, 0, sizeof(*view));
         return false;
     }
-    if (view->sapling_spends.count || view->orchard.count) {
+    if (!nf_v6_bundles_supported(view)) {
         LOG_WARN(NF_SUBSYS,
                  "[utxo_apply] unsupported v6 bundle rejected: sapling_spends=%llu "
                  "orchard_actions=%llu",
@@ -484,17 +497,10 @@ enum nf_pass1_result {
     NF_PASS1_STORE_ERROR
 };
 
-/* Pass 1 for one tx: check every Sprout JoinSplit nullifier, then every
- * Sapling spend nullifier, against the durable set + the EARLIER-tx
- * accumulator. Ironwood uses the same durable/earlier-tx checks and indexes
- * each action immediately so duplicate actions in one tx are also rejected. */
-static enum nf_pass1_result nf_pass1_accumulate_tx(
+static enum nf_pass1_result nf_pass1_accumulate_legacy(
     sqlite3 *db, const struct transaction *tx, struct nf_seen_index *seen,
     struct nf_entry *acc, size_t *n, struct delta_summary *summary)
 {
-    struct v6_wire_view v6;
-    if (!nf_v6_view(tx, &v6))
-        return NF_PASS1_STORE_ERROR;
     size_t tx_first = *n;   /* entries below this are EARLIER txs */
     for (size_t i = 0; i < tx->num_joinsplit; i++) {
         for (size_t j = 0; j < ZC_NUM_JS_INPUTS; j++) {
@@ -518,9 +524,17 @@ static enum nf_pass1_result nf_pass1_accumulate_tx(
     }
     if (!nf_index_insert_range(seen, acc, tx_first, *n))
         return NF_PASS1_STORE_ERROR;
-    for (uint64_t i = 0; i < v6.ironwood.count; i++) {
+    return NF_PASS1_CONTINUE;
+}
+
+static enum nf_pass1_result nf_pass1_accumulate_ironwood(
+    sqlite3 *db, const struct transaction *tx, const struct v6_wire_view *v6,
+    struct nf_seen_index *seen, struct nf_entry *acc, size_t *n,
+    struct delta_summary *summary)
+{
+    for (uint64_t i = 0; i < v6->ironwood.count; i++) {
         struct v6_action_view action;
-        if (!v6_core_bundle_action(&v6.ironwood, i, &action) ||
+        if (!v6_core_bundle_action(&v6->ironwood, i, &action) ||
             !action.nullifier.data || action.nullifier.size != 32) {
             LOG_WARN(NF_SUBSYS,
                      "[utxo_apply] checked Ironwood action view failed at %llu",
@@ -536,6 +550,24 @@ static enum nf_pass1_result nf_pass1_accumulate_tx(
             return NF_PASS1_STORE_ERROR;
     }
     return NF_PASS1_CONTINUE;
+}
+
+/* Pass 1 for one tx: check every Sprout JoinSplit nullifier, then every
+ * Sapling spend nullifier, against the durable set + the EARLIER-tx
+ * accumulator. Ironwood uses the same durable/earlier-tx checks and indexes
+ * each action immediately so duplicate actions in one tx are also rejected. */
+static enum nf_pass1_result nf_pass1_accumulate_tx(
+    sqlite3 *db, const struct transaction *tx, struct nf_seen_index *seen,
+    struct nf_entry *acc, size_t *n, struct delta_summary *summary)
+{
+    struct v6_wire_view v6;
+    if (!nf_v6_view(tx, &v6))
+        return NF_PASS1_STORE_ERROR;
+    enum nf_pass1_result result =
+        nf_pass1_accumulate_legacy(db, tx, seen, acc, n, summary);
+    if (result != NF_PASS1_CONTINUE)
+        return result;
+    return nf_pass1_accumulate_ironwood(db, tx, &v6, seen, acc, n, summary);
 }
 
 /* NOT inside utxo_apply_compute_block_delta on purpose: repair dry-runs call

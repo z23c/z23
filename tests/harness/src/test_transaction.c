@@ -1356,64 +1356,86 @@ static int test_tx_js_description_deserialize_groth_trailing(void)
     return failures;
 }
 
+static bool tx_v6_wire_initial_lifecycle(struct transaction *tx,
+                                         uint8_t wire[24])
+{
+    struct byte_stream fresh;
+    struct uint256 hash_out;
+    stream_init(&fresh, 64);
+    bool ok = !transaction_serialize(tx, &fresh) && fresh.size == 0 &&
+              !transaction_hash_serialized(tx, &hash_out);
+    stream_free(&fresh);
+    zcl_alloc_fault_fail_next("tx_v6_wire");
+    bool fresh_oom = !transaction_v6_store_wire(tx, wire, 24, 24);
+    stream_init(&fresh, 64);
+    ok = ok && fresh_oom && !transaction_serialize(tx, &fresh) &&
+         fresh.size == 0 && !transaction_hash_serialized(tx, &hash_out);
+    stream_free(&fresh);
+    tx->hash.data[0] = 7;
+    wire[20] = 42;
+    return ok && transaction_v6_store_wire(tx, wire, 24, 24) &&
+        uint256_is_null(&tx->hash);
+}
+
+static bool tx_v6_wire_rejection_lifecycle(struct transaction *tx,
+                                           uint8_t wire[24], bool ok)
+{
+    wire[20] = 9;
+    struct byte_stream stream;
+    stream_init(&stream, 64);
+    ok = ok && !transaction_serialize(tx, &stream) && stream.size == 0;
+    stream_free(&stream);
+    ok = ok && tx->v6_wire.size == 24 && tx->v6_wire.data[20] == 42;
+    ok = ok && !transaction_v6_store_wire(tx, wire, 19, 24);
+    ok = ok && !transaction_v6_store_wire(tx, wire, 24, 23);
+    wire[0] = 5;
+    ok = ok && !transaction_v6_store_wire(tx, wire, 24, 24);
+    wire[0] = 6;
+    struct transaction decoded;
+    struct byte_stream input;
+    stream_init_from_data(&input, wire, 24);
+    bool accepted = transaction_deserialize(&decoded, &input);
+    transaction_free(&decoded);
+    ok = ok && !accepted;
+    ok = ok && tx->v6_wire.size == 24 && tx->v6_wire.data[20] == 42;
+    ok = ok && transaction_v6_store_wire(tx, tx->v6_wire.data, tx->v6_wire.size,
+                                         tx->v6_wire.size);
+    tx->hash.data[0] = 9;
+    return ok;
+}
+
+static bool tx_v6_wire_copy_lifecycle(struct transaction *tx,
+                                      const uint8_t wire[24], bool ok)
+{
+    zcl_alloc_fault_fail_next("tx_v6_wire");
+    bool allocation_rejected = !transaction_v6_store_wire(tx, wire, 24, 24);
+    ok = ok && allocation_rejected && tx->v6_wire.data[20] == 42 &&
+        tx->hash.data[0] == 9;
+    zcl_alloc_fault_fail_next("tx_v6_wire");
+    struct transaction copy;
+    bool copy_failed = !transaction_copy(&copy, tx);
+    ok = ok && copy_failed && tx->v6_wire.data[20] == 42;
+    bool copied = transaction_copy(&copy, tx);
+    ok = ok && copied && copy.v6_wire.data != tx->v6_wire.data &&
+         copy.v6_wire.size == 24 && copy.v6_wire.data[20] == 42 &&
+         copy.hash.data[0] == 9;
+    transaction_free(tx);
+    ok = ok && copied && copy.v6_wire.data[20] == 42;
+    if (copied) transaction_free(&copy);
+    return ok;
+}
+
 static int test_tx_v6_wire_lifecycle(void)
 {
     uint8_t wire[24] = {6, 0, 0, 0x80, 0x98, 0xb6, 0x84, 0xd8};
-    struct transaction tx, copy;
+    struct transaction tx;
     transaction_init(&tx);
     tx.overwintered = true;
     tx.version = IRONWOOD_TX_VERSION;
     tx.version_group_id = IRONWOOD_VERSION_GROUP_ID;
-    struct byte_stream fresh;
-    struct uint256 hash_out;
-    stream_init(&fresh, 64);
-    bool ok = !transaction_serialize(&tx, &fresh) && fresh.size == 0 &&
-              !transaction_hash_serialized(&tx, &hash_out);
-    stream_free(&fresh);
-    zcl_alloc_fault_fail_next("tx_v6_wire");
-    bool fresh_oom = !transaction_v6_store_wire(&tx, wire, sizeof(wire), sizeof(wire));
-    stream_init(&fresh, 64);
-    ok = ok && fresh_oom && !transaction_serialize(&tx, &fresh) &&
-         fresh.size == 0 && !transaction_hash_serialized(&tx, &hash_out);
-    stream_free(&fresh);
-    tx.hash.data[0] = 7;
-    wire[20] = 42;
-    ok = ok && transaction_v6_store_wire(&tx, wire, sizeof(wire), sizeof(wire)) &&
-         uint256_is_null(&tx.hash);
-    wire[20] = 9;
-    struct byte_stream stream;
-    stream_init(&stream, 64);
-    ok = ok && !transaction_serialize(&tx, &stream) && stream.size == 0;
-    stream_free(&stream);
-    ok = ok && tx.v6_wire.size == sizeof(wire) && tx.v6_wire.data[20] == 42;
-    ok = ok && !transaction_v6_store_wire(&tx, wire, 19, sizeof(wire));
-    ok = ok && !transaction_v6_store_wire(&tx, wire, sizeof(wire), 23);
-    wire[0] = 5;
-    ok = ok && !transaction_v6_store_wire(&tx, wire, sizeof(wire), sizeof(wire));
-    wire[0] = 6;
-    struct transaction decoded;
-    struct byte_stream input;
-    stream_init_from_data(&input, wire, sizeof(wire));
-    bool accepted = transaction_deserialize(&decoded, &input);
-    transaction_free(&decoded);
-    ok = ok && !accepted;
-    ok = ok && tx.v6_wire.size == sizeof(wire) && tx.v6_wire.data[20] == 42;
-    ok = ok && transaction_v6_store_wire(&tx, tx.v6_wire.data, tx.v6_wire.size,
-                                          tx.v6_wire.size);
-    tx.hash.data[0] = 9;
-    zcl_alloc_fault_fail_next("tx_v6_wire");
-    bool allocation_rejected = !transaction_v6_store_wire(&tx, wire, sizeof(wire), sizeof(wire));
-    ok = ok && allocation_rejected && tx.v6_wire.data[20] == 42 && tx.hash.data[0] == 9;
-    zcl_alloc_fault_fail_next("tx_v6_wire");
-    bool copy_failed = !transaction_copy(&copy, &tx);
-    ok = ok && copy_failed && tx.v6_wire.data[20] == 42;
-    bool copied = transaction_copy(&copy, &tx);
-    ok = ok && copied && copy.v6_wire.data != tx.v6_wire.data &&
-         copy.v6_wire.size == sizeof(wire) && copy.v6_wire.data[20] == 42 &&
-         copy.hash.data[0] == 9;
-    transaction_free(&tx);
-    ok = ok && copied && copy.v6_wire.data[20] == 42;
-    if (copied) transaction_free(&copy);
+    bool ok = tx_v6_wire_initial_lifecycle(&tx, wire);
+    ok = tx_v6_wire_rejection_lifecycle(&tx, wire, ok);
+    ok = tx_v6_wire_copy_lifecycle(&tx, wire, ok);
     printf("transaction v6 wire ownership and copy... %s\n", ok ? "OK" : "FAIL");
     return ok ? 0 : 1;
 }
